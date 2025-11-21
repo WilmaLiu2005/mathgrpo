@@ -10,7 +10,7 @@ import yaml
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard.writer import SummaryWriter
 
-from countdown_task import CountdownTasksDataset, reward_function
+from countdown_task import GSM8KDataset, reward_function
 from grpo import rollout, update_policy
 from optimizer import MemoryEfficientAdamW
 from qwen2_model import Transformer
@@ -18,10 +18,11 @@ from tokenizer import Tokenizer
 
 
 def evaluate(model, tokenizer, device, dtype, config):
-    test_dataset = CountdownTasksDataset(
+    test_dataset = GSM8KDataset(
         data_path=config["data"]["path"],
         tokenizer=tokenizer,
         split="test",
+        config_name=config["data"].get("config_name", "main"),
         test_size=config["data"]["test_size"],
     )
     generator = torch.Generator(device=device)
@@ -30,7 +31,7 @@ def evaluate(model, tokenizer, device, dtype, config):
     dataloader = DataLoader(
         test_dataset,
         shuffle=False,
-        collate_fn=CountdownTasksDataset.collate_fn,
+        collate_fn=GSM8KDataset.collate_fn,
         generator=generator,
         batch_size=config["training"]["batch_size"] // 2,
         drop_last=False,
@@ -73,17 +74,18 @@ def main(config_path: str):
     tb_writer = SummaryWriter(log_dir=f"{config['training']['log_dir']}/{current_time}")
     tokenizer = Tokenizer(str(pretrained_model_path / "tokenizer.json"))
 
-    train_dataset = CountdownTasksDataset(
+    train_dataset = GSM8KDataset(
         data_path=config["data"]["path"],
         tokenizer=tokenizer,
         split="train",
+        config_name=config["data"].get("config_name", "main"),
         test_size=config["data"]["test_size"],
     )
     generator = torch.Generator(device=device)
     train_dataloader = DataLoader(
         train_dataset,
         shuffle=True,
-        collate_fn=CountdownTasksDataset.collate_fn,
+        collate_fn=GSM8KDataset.collate_fn,
         generator=generator,
         batch_size=NUM_QUESTIONS_PER_BATCH,
     )
