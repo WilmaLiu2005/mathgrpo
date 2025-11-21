@@ -66,22 +66,30 @@ The reward is the sum of two components:
 We use the `Qwen2.5-3B-Instruct` model for training. To train the model, run the following commands:
 
 ```bash
-# initialize the environment
-pip install uv
-uv sync
+# 激活你的 conda 环境（假设你已经有了合适的环境）
+# conda activate your_env_name
 
-# install git-lfs
+# 安装 git-lfs
 apt update; apt install git-lfs -y; git lfs install
 
-# download the dataset
-git clone https://huggingface.co/datasets/Jiayi-Pan/Countdown-Tasks-3to4
+# 下载数据集
+git clone git@hf.co:datasets/Jiayi-Pan/Countdown-Tasks-3to4
 
-# download the pretrained model
-git clone https://huggingface.co/Qwen/Qwen2.5-3B-Instruct
-# train the model
-uv run train.py
-# train the model with a 24GB VRAM GPU (e.g., an RTX 4090 GPU)
-uv run train.py --config config_24GB.yaml
+# 下载预训练模型
+git clone git@hf.co:Qwen/Qwen2.5-3B-Instruct
+
+# 安装必要的 Python 包（根据 train.py 的需求）
+pip install -U pip
+pip install torch --index-url https://download.pytorch.org/whl/cu124
+pip -r requirements.txt
+# 可能还需要其他依赖，根据实际情况添加
+# pip install peft deepspeed tensorboard
+
+# 训练模型
+python train.py
+
+# 使用 24GB VRAM GPU 训练（例如 RTX 4090）
+python train.py --config config_24GB.yaml
 ```
 ## Acknowledgements
 

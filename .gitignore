@@ -172,3 +172,7 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+gsm8k/
+Countdown-Tasks-3to4/
+Qwen2.5-3B-Instruct/
