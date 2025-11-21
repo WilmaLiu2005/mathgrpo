@@ -32,3 +32,19 @@ training:
   eval_interval: 10
 
   memory_efficient_adamw: false
+
+  num_epochs: 3        # 训练轮数（跑完整个数据集的次数）。不设则默认 1
+  max_steps: null      # 限制总步数（全局 step 计数）。例如 2000；设为 null/0/不写表示不限制
+  
+wandb:
+  enable: true
+  project: mathgrpo
+  entity: amdyes   # 可选
+  run_name: ""                    # 为空则用时间戳
+  mode: online                    # 或 offline/disabled
+  watch_model: false              # 是否记录梯度/参数直方图
+  watch_log_freq: 100
+  log_text_every: 100             # 多久记录一次文本样例
+  num_text_samples: 4             # 每次记录多少条样例
+  save_ckpt_artifact: false       # 是否把 ckpt 作为 artifact 上传
+  artifact_name_prefix: grpo-qwen

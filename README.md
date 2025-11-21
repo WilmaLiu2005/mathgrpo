@@ -1,13 +1,15 @@
 # GRPO:Zero
 
-GRPO training with minimal dependencies (and low GPU memory usage!). We implement almost everything from scratch and only depend on `tokenizers` for tokenization and `pytorch` for training. 
-- No `transformers` and `vLLM` dependencies! 
-- The default config is set to run on a single A40 GPU (48GB VRAM) for a few hours to get good results. (An A40 costs `$0.44` per hour if you rent it from RunPod.)
-- We also support training with a 24GB VRAM GPU (e.g., an RTX 4090 GPU) by offloading the optimizer to CPU. Fortunately, this only adds a small overhead to the training because we only update the policy network a few hundred times during the entire training process.
-- We support several improvements over the original GRPO algorithm from the [DAPO project](https://arxiv.org/abs/2503.14476), including:
-    - **Token-level policy gradient loss**: every token is equally weighted in the policy gradient loss.
-    - **Removing KL Divergence**: the KL divergence is not used in the policy gradient loss. This reduces GPU memory usage as we no longer need the reference policy network.
-    - **Overlong episode filtering**: skips unfinished episodes that exceed context length limits. This stabilizes training. Though we disabled it by default to observe model learning under limited context length. Set `skip_unfinished_episodes` to `true` to enable it.
+GRPO training with minimal dependencies (and low GPU memory usage!). We implement almost everything from scratch and only depend on `tokenizers` for tokenization and `pytorch` for training.
+
+* No `transformers` and `vLLM` dependencies!
+* The default config is set to run on a single A40 GPU (48GB VRAM) for a few hours to get good results. (An A40 costs `$0.44` per hour if you rent it from RunPod.)
+* We also support training with a 24GB VRAM GPU (e.g., an RTX 4090 GPU) by offloading the optimizer to CPU. Fortunately, this only adds a small overhead to the training because we only update the policy network a few hundred times during the entire training process.
+* We support several improvements over the original GRPO algorithm from the [DAPO project](https://arxiv.org/abs/2503.14476), including:
+
+  * **Token-level policy gradient loss**: every token is equally weighted in the policy gradient loss.
+  * **Removing KL Divergence**: the KL divergence is not used in the policy gradient loss. This reduces GPU memory usage as we no longer need the reference policy network.
+  * **Overlong episode filtering**: skips unfinished episodes that exceed context length limits. This stabilizes training. Though disabled by default to observe model learning under limited context length. Set `skip_unfinished_episodes` to `true` to enable it.
 
 ## Algorithm 
 
@@ -37,28 +39,40 @@ $$
 
 7. Update the policy network $\pi(\theta)$ using the gradient. Go back to step 1.
 
-## CountDown Task
+## GSM8K Task
 
-We are going to train the Qwen2.5 models on the [CountDown task](https://huggingface.co/datasets/Jiayi-Pan/Countdown-Tasks-3to4). Given a list of 3 or 4 numbers and a target number, the model needs to generate a mathematical expression using simple arithmetic operations (+, -, *, /) that evaluates to the target number. For example:
+We train the Qwen2.5 models on the **GSM8K** dataset, a grade-school math word-problem dataset. Each question describes a short math scenario, and the goal is to produce the correct final numeric answer.
+
+Example:
 
 ```
-Question: Given 1 2 3 4 and a target number 11. Show an expression that evaluates to 11.
-Answer: 1 + (2 * 3) + 4
+Question:  
+A book costs 12 dollars and a pen costs 3 dollars. If Jenny buys 4 books and 2 pens, how much does she spend?
+
+Answer:  (step-by-step reasoning...)  →  54
 ```
 
 ## Reward Function
 
-To solve the CountDown task, we will use the GRPO algorithm to train the model to generate the chain of thought reasoning before generating the final expression. Specifically, the model is trained to follow the format:
+To solve GSM8K, the model is trained (using GRPO) to generate chain-of-thought reasoning before giving the final numerical answer. The expected output format is:
 
 ```
-<think>Model step by step reasoning</think>
-<answer>Final answer</answer>
+<think>Model step-by-step reasoning</think>
+<answer>Final numeric answer</answer>
 ```
 
-The reward is the sum of two components:
+The reward has two components:
 
-1. **Format Reward**: The model earns a reward of `0.1` when it correctly follows the specified format with thinking and answer tags, and `0` otherwise.
-2. **Answer Reward**: The model receives a reward of `1` if its final answer uses each provided number exactly once and correctly evaluates to the target value, otherwise it receives `0`.
+1. **Format Reward**
+   The model gets **0.1** reward if it produces the exact required XML-style format with `<think>`…`</think>` and `<answer>`…`</answer>` tags. Otherwise 0.
+
+2. **Answer Reward**
+   The model receives a reward of **1** if:
+
+   * the final answer inside `<answer>`…`</answer>` is a valid number
+   * and matches the ground-truth GSM8K answer exactly
+
+   Otherwise, the reward is **0**.
 
 
 ## Training
@@ -70,26 +84,18 @@ We use the `Qwen2.5-3B-Instruct` model for training. To train the model, run the
 # conda activate your_env_name
 
 # 安装 git-lfs
-apt update; apt install git-lfs -y; git lfs install
+(apt update; apt install git-lfs -y; )git lfs install
 
-# 下载数据集
-git clone git@hf.co:datasets/Jiayi-Pan/Countdown-Tasks-3to4
-
-# 下载预训练模型
-git clone git@hf.co:Qwen/Qwen2.5-3B-Instruct
-
-# 安装必要的 Python 包（根据 train.py 的需求）
 pip install -U pip
 pip install torch --index-url https://download.pytorch.org/whl/cu124
 pip -r requirements.txt
-# 可能还需要其他依赖，根据实际情况添加
-# pip install peft deepspeed tensorboard
+
+# 下载数据集和预训练模型
+python download.py
 
 # 训练模型
 python train.py
 
-# 使用 24GB VRAM GPU 训练（例如 RTX 4090）
-python train.py --config config_24GB.yaml
 ```
 ## Acknowledgements
 

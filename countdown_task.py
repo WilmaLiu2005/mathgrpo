@@ -23,27 +23,43 @@ USER_TEMPLATE = (
 
 RESPONSE_PROMPT = "Let me solve this step by step.\n<think>"
 
-
 class GSM8KDataset(Dataset):
     """Unified dataset for GSM8K main and socratic splits."""
-
     def __init__(
         self,
         tokenizer: Tokenizer,
         data_path: str,
-        split="train",
-        test_size=100,
-        config_name="main",   # <-- add config support
+        split: str = "train",
+        test_size: int = 100,
+        config_name: str = "main",
     ):
-        data_file = Path(data_path) / config_name / split + ".parquet"
-        # or you already have a folder "main/train-00000-of-00001.parquet"
-        # then use pattern:
-        data = pd.read_parquet(Path(data_path) / config_name)
+        base_dir = Path(data_path) / config_name
+        split_file = base_dir / f"{split}.parquet"
 
-        # split handling
-        self.data = (
-            data.iloc[:-test_size] if split == "train" else data.iloc[-test_size:]
-        )
+        explicit_split_file = False
+        if split_file.exists():
+            # 直接读取指定 split 文件，例如 .../gsm8k/main/train.parquet
+            data = pd.read_parquet(split_file)
+            explicit_split_file = True
+        else:
+            # 尝试读取分片文件，例如 train-00000-of-00001.parquet
+            shard_files = sorted(base_dir.glob(f"{split}-*.parquet"))
+            if shard_files:
+                data = pd.concat([pd.read_parquet(f) for f in shard_files], ignore_index=True)
+                explicit_split_file = True
+            else:
+                # 找不到就报错，提示应提供 {split}.parquet
+                raise FileNotFoundError(
+                    f"Cannot find parquet for split='{split}'. "
+                    f"Tried: {split_file} and shards {base_dir}/{split}-*.parquet"
+                )
+
+        # 如果是明确的 split 文件，就不再做 test_size 切分；否则（保留旧逻辑）才切分
+        if explicit_split_file:
+            self.data = data
+        else:
+            self.data = data.iloc[:-test_size] if split == "train" else data.iloc[-test_size:]
+
         self.tokenizer = tokenizer
 
     def __len__(self):
@@ -53,8 +69,6 @@ class GSM8KDataset(Dataset):
         item = self.data.iloc[idx].to_dict()
         q = item["question"]
         a = item["answer"]
-
-        # user prompt
         item.update(self.encode_prefix(q))
         return item
 
@@ -78,12 +92,11 @@ class GSM8KDataset(Dataset):
     def collate_fn(batch):
         return MiniBatch(
             questions=[x["question"] for x in batch],
-            answers=[x["answer"] for x in batch],  # now gold answer is kept
+            answers=[x["answer"] for x in batch],
             prefix=[x["prefix"] for x in batch],
             prefix_tokens=[x["prefix_tokens"] for x in batch],
             prefix_token_ids=[x["prefix_token_ids"] for x in batch],
         )
-
 
 def format_reward_function(response: str, end_token: Optional[str] = None) -> float:
     """
