@@ -1,0 +1,7 @@
+# 此文档记录什么时间，谁做了哪些改动
+11.21 刘昕雨
+1. 调整了路径解析方式之后，minibatch出了问题
+2. minibatch加了GSM8k的新的字段
+3. grpo.py里要把numbers 和 targets字段改成question和answer（后面要改数据集的话要换这个名字）
+4. 加了wandb
+5. 加了训练几轮的设定

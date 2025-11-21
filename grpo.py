@@ -11,7 +11,7 @@ from data_types import Episode, MiniBatch
 from qwen2_model import Transformer
 from tokenizer import Tokenizer
 
-
+# 同一道题采样K个答案
 @torch.no_grad()
 def rollout(
     model: Transformer,
@@ -26,7 +26,7 @@ def rollout(
     end_token = tokenizer.eos_token
     end_token_id = tokenizer.eos_token_id
     pad_token_id = tokenizer.pad_token_id
-    prefix_token_ids = batch.prefix_token_ids
+    prefix_token_ids = batch.prefix_token_ids # prompt tokenize之后的列表
     bsz = len(batch.prefix) * num_answer_per_question
     min_prompt_len = min(len(t) for t in prefix_token_ids)
     max_prompt_len = max(len(t) for t in prefix_token_ids)
@@ -94,8 +94,8 @@ def rollout(
             generated_text = tokenizer.detokenize(generated_token_ids)
             rewards = reward_function(
                 response=generated_text,
-                numbers=batch.numbers[i],
-                target=batch.target[i],
+                question=batch.questions[i],   # 可选
+                answer=batch.answers[i],       # 必需：用 gold answer 比对
                 end_token=end_token,
             )
             episode = Episode(
