@@ -15,6 +15,8 @@ from qwen2_model import Transformer
 from tokenizer import Tokenizer
 import wandb
 
+from copy import deepcopy
+
 def evaluate(model, tokenizer, device, dtype, config):
     test_dataset = GSM8KDataset(
         data_path=config["data"]["path"],
@@ -57,6 +59,7 @@ def main(config_path: str):
     wandb.init(
         project=config["training"].get("wandb_project", "mathgrpo"),
         name=config["training"].get("wandb_run_name", "first_time"),
+        mode=config["wandb"].get("mode", "online"),
         config=config
     )
 
@@ -97,6 +100,12 @@ def main(config_path: str):
     )
 
     model = Transformer.from_pretrained(pretrained_model_path, device=device).train()
+
+    ref_model = deepcopy(model)
+    ref_model.eval()
+    for p in ref_model.parameters():
+        p.requires_grad = False    
+
     optimizer = MemoryEfficientAdamW(
         model.parameters(),
         lr=config["training"]["learning_rate"],
@@ -139,6 +148,7 @@ def main(config_path: str):
 
             results = update_policy(
                 model=model,
+                ref_model=ref_model,
                 optimizer=optimizer,
                 episodes=episodes,
                 micro_batch_size=config["training"]["micro_batch_size"],
@@ -146,6 +156,7 @@ def main(config_path: str):
                 max_grad_norm=config["training"]["max_grad_norm"],
                 device=device,
                 dtype=dtype,
+                kl_coeff=config["training"].get("kl_coeff", 0.05)
             )
 
             torch.cuda.synchronize()
@@ -167,6 +178,7 @@ def main(config_path: str):
             entropy = results["entropy"]
             lr = optimizer.param_groups[0]["lr"]
             loss = results["loss"]
+            kl_loss = results["kl_loss"]
             mean_response_len = float(np.mean([len(ep.generated_token_ids) for ep in episodes])) if episodes else 0.0
 
             print(
@@ -188,6 +200,7 @@ def main(config_path: str):
 
             # TensorBoard（用 global_step）
             tb_writer.add_scalar("loss", loss, global_step)
+            tb_writer.add_scalar("kl_loss", kl_loss, global_step)
             tb_writer.add_scalar("mean_reward", mean_reward, global_step)
             tb_writer.add_scalar("std_reward", std_reward, global_step)
             tb_writer.add_scalar("success_rate/train", success_rate, global_step)
@@ -202,6 +215,7 @@ def main(config_path: str):
             # Wandb（用 global_step）
             wandb.log({
                 "loss": loss,
+                "kl_loss": kl_loss,
                 "mean_reward": mean_reward,
                 "std_reward": std_reward,
                 "success_rate/train": success_rate,
