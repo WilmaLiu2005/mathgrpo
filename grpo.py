@@ -136,9 +136,20 @@ def compute_entropy(logits: torch.Tensor) -> torch.Tensor:
     entropy = torch.logsumexp(logits, dim=-1) - torch.sum(probs * logits, dim=-1)
     return entropy
 
+def compute_kl_loss(model_logits: torch.Tensor, ref_logits: torch.Tensor) -> torch.Tensor:
+    """
+    Compute KL(p || q)
+    """
+    log_p = torch.nn.functional.log_softmax(model_logits, dim=-1)   # (B, L, K)
+    log_q = torch.nn.functional.log_softmax(ref_logits,  dim=-1)    # (B, L, K)
+    p = log_p.exp()    # (B, L, K)
+    # standard KL
+    kl = (p * (log_p - log_q)).sum(dim=-1)   # (B, L)
+    return kl
 
 def update_policy(
     model,
+    ref_model, 
     optimizer,
     episodes: List[Episode],
     micro_batch_size: int,
@@ -146,6 +157,7 @@ def update_policy(
     max_grad_norm: float,
     device: torch.device,
     dtype: torch.dtype,
+    kl_coeff: float = 0.05,
 ):
     """Update the policy using the GRPO algorithm."""
     episodes = normalize_rewards_per_group(episodes)
@@ -192,6 +204,8 @@ def update_policy(
             target_token_ids = batch_token_ids[:, 1:]
             target_masks = batch_masks[:, 1:]
             logits = model.forward(input_token_ids).float()
+            with torch.no_grad():
+                ref_logits = ref_model.forward(input_token_ids).float()
 
         log_probs = -torch.nn.functional.cross_entropy(
             logits.reshape(-1, logits.size(-1)),
@@ -199,6 +213,9 @@ def update_policy(
             ignore_index=pad_token_id,
             reduction="none",
         ).reshape(input_token_ids.shape[0], -1)
+
+        kl = compute_kl_loss(logits, ref_logits)
+        kl_loss = (kl * target_masks).sum() / num_target_tokens
 
         with torch.no_grad():
             token_entropy = compute_entropy(logits)
@@ -208,6 +225,7 @@ def update_policy(
         # per-token objective
         obj = (obj * target_masks).sum() / num_target_tokens
         loss = -obj
+        loss += kl_coeff * kl_loss
         loss.backward()
 
     # update the policy
@@ -218,6 +236,7 @@ def update_policy(
     optimizer.zero_grad(set_to_none=True)
     return {
         "loss": loss.item(),
+        "kl_loss": kl_loss.mean().item(),
         "grad_norm": grad_norm.item(),
         "entropy": entropy.item(),
     }
