@@ -1,10 +1,10 @@
 model:
-  pretrained_model_path: "Qwen2.5-3B-Instruct"
+  pretrained_model_path: "/home/student008/GRPO-Zero/Qwen2.5-3B-Instruct/models--Qwen--Qwen2.5-3B-Instruct/snapshots/aa8e72537993ba99e69dfaafa59ed015b17504d1"
   device: "cuda"
   dtype: "bfloat16"
 
 data:
-  path: "gsm8k"          # ← 你的 GSM8K 数据存放目录
+  path: "/home/student008/GRPO-Zero/gsm8k"          # ← 你的 GSM8K 数据存放目录
   config_name: "main"    # ← 可选: "main" 或 "socratic"
   test_size: 128
 
@@ -13,22 +13,24 @@ training:
 
   # GSM8K 题目较长，把 prompt 长度稍微调大
   max_prompt_len: 512
-  max_gen_len: 1024
+  max_gen_len: 512
 
-  batch_size: 256
-  num_questions_per_batch: 32
+  batch_size: 32
+  num_questions_per_batch: 16
 
   micro_batch_size: 2
   max_grad_norm: 1.0
   learning_rate: 1.0e-5
   weight_decay: 0.0
   betas: [0.9, 0.999]
+  epsilon_low: 0.3
+  epsilon_high: 0.3
 
   ckpt_dir: "ckpt"
   log_dir: "logs"
 
   skip_unfinished_episodes: false
-  ckpt_save_interval: 100
+  ckpt_save_interval: 300
   eval_interval: 10
 
   memory_efficient_adamw: false

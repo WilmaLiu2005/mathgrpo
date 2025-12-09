@@ -1,5 +1,6 @@
 import html
 import time
+import random
 from argparse import ArgumentParser
 from datetime import datetime
 from pathlib import Path
@@ -69,7 +70,12 @@ def main(config_path: str):
     }
     dtype = dtype_map.get(config["model"]["dtype"], torch.bfloat16)
     torch.set_default_device(device)
-    torch.random.manual_seed(config["training"]["random_seed"])
+    
+    seed = config["training"]["random_seed"]
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
     BATCH_SIZE = config["training"]["batch_size"]
     NUM_QUESTIONS_PER_BATCH = config["training"]["num_questions_per_batch"]
@@ -88,6 +94,7 @@ def main(config_path: str):
         test_size=config["data"]["test_size"],
     )
     generator = torch.Generator(device=device)
+    generator.manual_seed(seed)
     train_dataloader = DataLoader(
         train_dataset,
         shuffle=True,
@@ -146,6 +153,8 @@ def main(config_path: str):
                 max_grad_norm=config["training"]["max_grad_norm"],
                 device=device,
                 dtype=dtype,
+                epsilon_low=config["training"].get("epsilon_low"),
+                epsilon_high=config["training"].get("epsilon_high"),
             )
 
             torch.cuda.synchronize()

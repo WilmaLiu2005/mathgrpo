@@ -7,3 +7,4 @@ tensorboard>=2.19.0
 tokenizers>=0.21.1
 huggingface_hub
 wandb
+datasets>=2.14.5

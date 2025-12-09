@@ -9,6 +9,7 @@ class Episode:
     prefix_token_ids: List[int]
     prefix_tokens: List[str]
     generated_token_ids: List[int]
+    old_log_probs: List[float]
     is_finished: bool
     reward: float
     reward_info: Dict[str, float]

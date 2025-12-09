@@ -88,7 +88,7 @@ We use the `Qwen2.5-3B-Instruct` model for training. To train the model, run the
 
 pip install -U pip
 pip install torch --index-url https://download.pytorch.org/whl/cu124
-pip -r requirements.txt
+pip install -r requirements.txt
 
 # 下载数据集和预训练模型
 python download.py

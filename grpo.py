@@ -38,6 +38,7 @@ def rollout(
         dtype=dtype,
     )
     tokens = torch.full((bsz, total_len), pad_token_id, dtype=torch.long, device=device)
+    token_log_probs = torch.zeros((bsz, total_len), dtype=torch.float, device=device)
     for k, t in enumerate(prefix_token_ids):
         offset = k * num_answer_per_question
         for i in range(num_answer_per_question):
@@ -58,12 +59,19 @@ def rollout(
         )
         with torch.autocast(device_type=device.type, dtype=dtype):
             logits = model.inference(tokens[:, prev_pos:cur_pos], prev_pos)
-        probs = torch.softmax(logits[:, -1], dim=-1)
+        
+        log_probs_all = torch.log_softmax(logits[:, -1], dim=-1)
+        probs = torch.exp(log_probs_all)
         next_token = torch.multinomial(probs, num_samples=1)
         next_token = next_token.reshape(-1)
+        
         next_token = torch.where(
             input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token
         )
+        
+        selected_log_probs = log_probs_all.gather(1, next_token.unsqueeze(1)).squeeze(1)
+        token_log_probs[:, cur_pos] = selected_log_probs
+
         # if an rollout is finished, we fill the rest of the tokens with pad_token_id
         next_token = torch.where(is_finished, pad_token_id, next_token)
         tokens[:, cur_pos] = next_token
@@ -79,6 +87,7 @@ def rollout(
     torch.cuda.empty_cache()
     is_finished_list = is_finished.tolist()
     tokens_list = tokens.tolist()
+    token_log_probs_list = token_log_probs.tolist()
 
     # prepare the output episodes
     episodes = []
@@ -86,11 +95,12 @@ def rollout(
         for j in range(num_answer_per_question):
             idx = i * num_answer_per_question + j
             generated_token_ids = tokens_list[idx][len(batch.prefix_token_ids[i]) :]
+            generated_log_probs = token_log_probs_list[idx][len(batch.prefix_token_ids[i]) :]
             # remove padding tokens
             if pad_token_id in generated_token_ids:
-                generated_token_ids = generated_token_ids[
-                    : generated_token_ids.index(pad_token_id)
-                ]
+                pad_idx = generated_token_ids.index(pad_token_id)
+                generated_token_ids = generated_token_ids[:pad_idx]
+                generated_log_probs = generated_log_probs[:pad_idx]
             generated_text = tokenizer.detokenize(generated_token_ids)
             rewards = reward_function(
                 response=generated_text,
@@ -104,6 +114,7 @@ def rollout(
                 prefix_token_ids=batch.prefix_token_ids[i],
                 prefix_tokens=batch.prefix_tokens[i],
                 generated_token_ids=generated_token_ids,
+                old_log_probs=generated_log_probs,
                 is_finished=is_finished_list[idx],
                 reward=rewards["reward"],
                 reward_info=rewards["reward_info"],
@@ -146,6 +157,8 @@ def update_policy(
     max_grad_norm: float,
     device: torch.device,
     dtype: torch.dtype,
+    epsilon_low: float = 0.2,
+    epsilon_high: float = 0.2,
 ):
     """Update the policy using the GRPO algorithm."""
     episodes = normalize_rewards_per_group(episodes)
@@ -174,6 +187,12 @@ def update_policy(
             + [pad_token_id] * (batch_max_length - batch_lengths[i])
             for i, episode in enumerate(batch_episodes)
         ]
+        batch_old_log_probs = [
+            [0.0] * len(episode.prefix_token_ids)
+            + episode.old_log_probs
+            + [0.0] * (batch_max_length - batch_lengths[i])
+            for i, episode in enumerate(batch_episodes)
+        ]
         batch_masks = [
             [0] * len(episode.prefix_token_ids)
             + [1] * len(episode.generated_token_ids)
@@ -182,6 +201,7 @@ def update_policy(
         ]
         batch_advantages = [episode.reward for episode in batch_episodes]
         batch_token_ids = torch.tensor(batch_token_ids, device=device, dtype=torch.long)
+        batch_old_log_probs = torch.tensor(batch_old_log_probs, device=device, dtype=torch.float32)
         batch_masks = torch.tensor(batch_masks, device=device, dtype=torch.bool)
         batch_advantages = torch.tensor(
             batch_advantages, device=device, dtype=torch.float32
@@ -191,6 +211,7 @@ def update_policy(
             input_token_ids = batch_token_ids[:, :-1]
             target_token_ids = batch_token_ids[:, 1:]
             target_masks = batch_masks[:, 1:]
+            old_log_probs = batch_old_log_probs[:, 1:]
             logits = model.forward(input_token_ids).float()
 
         log_probs = -torch.nn.functional.cross_entropy(
@@ -204,7 +225,29 @@ def update_policy(
             token_entropy = compute_entropy(logits)
             entropy = entropy + (token_entropy * target_masks).sum() / num_target_tokens
 
-        obj = log_probs * batch_advantages[:, None]
+        # Importance Sampling with Dynamic Adaptive Clipping
+        ratio = torch.exp(log_probs - old_log_probs)
+        q_x = torch.exp(old_log_probs)
+        
+        # Dynamic bounds
+        # L(x) = 0.5 + 0.5 * sqrt(max(1 - 4*eps_low/q(x), 0))
+        val_low = 1 - 4 * epsilon_low / (q_x + 1e-10)
+        val_low = torch.clamp(val_low, min=0.0)
+        lower_bound = 0.5 + 0.5 * torch.sqrt(val_low)
+        
+        # U(x) = 0.5 + 0.5 * sqrt(1 + 4*eps_high/q(x))
+        val_high = 1 + 4 * epsilon_high / (q_x + 1e-10)
+        upper_bound = 0.5 + 0.5 * torch.sqrt(val_high)
+        
+        clipped_ratio = torch.clamp(ratio, min=lower_bound, max=upper_bound)
+        
+        advantages = batch_advantages[:, None]
+        surr1 = ratio * advantages
+        surr2 = clipped_ratio * advantages
+        obj = torch.min(surr1, surr2)
+
+        # obj = log_probs * batch_advantages[:, None]
+
         # per-token objective
         obj = (obj * target_masks).sum() / num_target_tokens
         loss = -obj
