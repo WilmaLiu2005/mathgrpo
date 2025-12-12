@@ -114,11 +114,25 @@ def rollout(
     return episodes
 
 
-def normalize_rewards_per_group(episodes: List[Episode]) -> List[Episode]:
-    """Normalize rewards per group. A group is defined by the prefix."""
+def normalize_rewards_per_group(episodes: List[Episode], use_length_grouping: bool = False) -> List[Episode]:
+    """Normalize rewards per group. A group is defined by the prefix (and optionally response length bucket)."""
     groups = defaultdict(list)
     for episode in episodes:
-        groups[tuple(episode.prefix)].append(episode)
+        if use_length_grouping:
+            # Determine length bucket
+            length = len(episode.generated_token_ids)
+            if length < 100:
+                bucket = "short"
+            elif length <= 300:
+                bucket = "medium"
+            else:
+                bucket = "long"
+            key = (tuple(episode.prefix), bucket)
+        else:
+            key = tuple(episode.prefix)
+        
+        groups[key].append(episode)
+        
     output = []
     for group in groups.values():
         group_rewards = [item.reward for item in group]
@@ -158,9 +172,10 @@ def update_policy(
     device: torch.device,
     dtype: torch.dtype,
     kl_coeff: float = 0.05,
+    use_length_grouping: bool = False,
 ):
     """Update the policy using the GRPO algorithm."""
-    episodes = normalize_rewards_per_group(episodes)
+    episodes = normalize_rewards_per_group(episodes, use_length_grouping=use_length_grouping)
     # sort episodes by token length for efficient (micro-)batching
     episodes.sort(key=lambda x: len(x.prefix_token_ids) + len(x.generated_token_ids))
     num_micro_batches = math.ceil(len(episodes) / micro_batch_size)
