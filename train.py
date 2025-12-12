@@ -35,6 +35,7 @@ def evaluate(model, tokenizer, device, dtype, config):
         drop_last=False,
     )
     success = []
+    lengths = []
     for batch in dataloader:
         episodes = rollout(
             model=model,
@@ -47,7 +48,8 @@ def evaluate(model, tokenizer, device, dtype, config):
             dtype=dtype,
         )
         success.extend([episode.reward_info["answer_reward"] for episode in episodes])
-    return np.mean(success)
+        lengths.extend([len(episode.generated_token_ids) for episode in episodes])
+    return np.mean(success), np.mean(lengths)
 
 def main(config_path: str):
     with open(config_path, "r") as f:
@@ -57,8 +59,8 @@ def main(config_path: str):
     # Init wandb
     # ---------------------------
     wandb.init(
-        project=config["training"].get("wandb_project", "mathgrpo"),
-        name=config["training"].get("wandb_run_name", "first_time"),
+        project=config["wandb"].get("project", "mathgrpo"),
+        name=config["wandb"].get("run_name", "baseline"),
         mode=config["wandb"].get("mode", "online"),
         config=config
     )
@@ -156,7 +158,8 @@ def main(config_path: str):
                 max_grad_norm=config["training"]["max_grad_norm"],
                 device=device,
                 dtype=dtype,
-                kl_coeff=config["training"].get("kl_coeff", 0.05)
+                kl_coeff=config["training"].get("kl_coeff", 0.05),
+                use_length_grouping=config["training"].get("use_length_grouping", False)
             )
 
             torch.cuda.synchronize()
@@ -193,10 +196,11 @@ def main(config_path: str):
 
             # Eval 按 global_step 触发
             if global_step % config["training"]["eval_interval"] == 0:
-                eval_success_rate = evaluate(model, tokenizer, device, dtype, config)
-                print(f"\rEval success rate: {eval_success_rate:.2f}" + " " * 100)
+                eval_success_rate, eval_mean_len = evaluate(model, tokenizer, device, dtype, config)
+                print(f"\rEval success rate: {eval_success_rate:.2f}, Eval mean len: {eval_mean_len:.2f}" + " " * 100)
                 tb_writer.add_scalar("success_rate/eval", eval_success_rate, global_step)
-                wandb.log({"success_rate/eval": float(eval_success_rate)}, step=global_step)
+                tb_writer.add_scalar("mean_response_len/eval", eval_mean_len, global_step)
+                wandb.log({"success_rate/eval": float(eval_success_rate), "mean_response_len/eval": float(eval_mean_len)}, step=global_step)
 
             # TensorBoard（用 global_step）
             tb_writer.add_scalar("loss", loss, global_step)
