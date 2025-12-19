@@ -14,10 +14,43 @@ from optimizer import MemoryEfficientAdamW
 from qwen2_model import Transformer
 from tokenizer import Tokenizer
 import wandb
-
+import random
 from copy import deepcopy
 
-def evaluate(model, tokenizer, device, dtype, config):
+def sample_trace_by_length_group(episodes):
+    groups = {"short": [], "medium": [], "long": []}
+    
+    # Compute length distribution statistics
+    lengths = [len(ep.generated_token_ids) for ep in episodes]
+    if len(lengths) > 0:
+        mean_length = np.mean(lengths)
+        std_length = np.std(lengths)
+        # Handle edge case where all lengths are the same (std = 0)
+        if std_length < 1e-6:
+            std_length = 1.0  # Use a small default std to avoid division issues
+        # Group by: < mean - sigma (short), mean - sigma to mean + sigma (medium), > mean + sigma (long)
+        lower_bound = mean_length - std_length
+        upper_bound = mean_length + std_length
+    else:
+        # Fallback if no episodes
+        lower_bound = 0
+        upper_bound = float('inf')
+    
+    for ep in episodes:
+        length = len(ep.generated_token_ids)
+        if length < lower_bound:
+            groups["short"].append(ep)
+        elif length <= upper_bound:
+            groups["medium"].append(ep)
+        else:
+            groups["long"].append(ep)
+    sampled = {}
+    for k, v in groups.items():
+        if v:
+            sampled[k] = random.choice(v)
+    return sampled
+
+def evaluate(model, tokenizer, device, dtype, config, global_step):
     test_dataset = GSM8KDataset(
         data_path=config["data"]["path"],
         tokenizer=tokenizer,
@@ -36,6 +69,7 @@ def evaluate(model, tokenizer, device, dtype, config):
     )
     success = []
     lengths = []
+    all_episodes = []
     for batch in dataloader:
         episodes = rollout(
             model=model,
@@ -47,8 +81,15 @@ def evaluate(model, tokenizer, device, dtype, config):
             device=device,
             dtype=dtype,
         )
+        all_episodes.extend(episodes)
         success.extend([episode.reward_info["answer_reward"] for episode in episodes])
         lengths.extend([len(episode.generated_token_ids) for episode in episodes])
+        
+    # 采样trace
+    sampled_traces = sample_trace_by_length_group(all_episodes)
+    for group, ep in sampled_traces.items():
+        print(f"[{group}] trace: {ep.text[:200]} ...")  # 只打印前200字符
+        wandb.log({f"eval_trace/{group}": wandb.Html(f"<pre>{ep.text}</pre>")}, step=global_step)
     return np.mean(success), np.mean(lengths)
 
 def main(config_path: str):
@@ -196,7 +237,7 @@ def main(config_path: str):
 
             # Eval 按 global_step 触发
             if global_step % config["training"]["eval_interval"] == 0:
-                eval_success_rate, eval_mean_len = evaluate(model, tokenizer, device, dtype, config)
+                eval_success_rate, eval_mean_len = evaluate(model, tokenizer, device, dtype, config, global_step)
                 print(f"\rEval success rate: {eval_success_rate:.2f}, Eval mean len: {eval_mean_len:.2f}" + " " * 100)
                 tb_writer.add_scalar("success_rate/eval", eval_success_rate, global_step)
                 tb_writer.add_scalar("mean_response_len/eval", eval_mean_len, global_step)

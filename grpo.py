@@ -117,13 +117,26 @@ def rollout(
 def normalize_rewards_per_group(episodes: List[Episode], use_length_grouping: bool = False) -> List[Episode]:
     """Normalize rewards per group. A group is defined by the prefix (and optionally response length bucket)."""
     groups = defaultdict(list)
+    
+    if use_length_grouping:
+        # Compute length distribution statistics
+        lengths = [len(episode.generated_token_ids) for episode in episodes]
+        mean_length = np.mean(lengths)
+        std_length = np.std(lengths)
+        # Handle edge case where all lengths are the same (std = 0)
+        if std_length < 1e-6:
+            std_length = 1.0  # Use a small default std to avoid division issues
+        # Group by: < mean - sigma (short), mean - sigma to mean + sigma (medium), > mean + sigma (long)
+        lower_bound = mean_length - std_length
+        upper_bound = mean_length + std_length
+    
     for episode in episodes:
         if use_length_grouping:
-            # Determine length bucket
+            # Determine length bucket based on normal distribution
             length = len(episode.generated_token_ids)
-            if length < 100:
+            if length < lower_bound:
                 bucket = "short"
-            elif length <= 300:
+            elif length <= upper_bound:
                 bucket = "medium"
             else:
                 bucket = "long"
