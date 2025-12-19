@@ -97,7 +97,7 @@ class GSM8KDataset(Dataset):
             prefix_token_ids=[x["prefix_token_ids"] for x in batch],
         )
 
-def format_reward_function(response: str, end_token: Optional[str] = None) -> float:
+def formatpenalty(response: str, end_token: Optional[str] = None) -> float:
     """
     Checks if the response follows the format <think>...</think><answer>...</answer>
     """
@@ -114,17 +114,17 @@ def format_reward_function(response: str, end_token: Optional[str] = None) -> fl
     full_format_match = re.match(full_format_regex, response, re.DOTALL)
 
     if full_format_match:
-        return 1.0
+        return 0.0
 
-    reward = 0.0
+    penalty = 0.0
 
     if think_match:
-        reward += 0.1
+        penalty -= 0.1
 
     if answer_match:
-        reward += 0.5
+        penalty -= 0.5
 
-    return reward
+    return penalty
 
 
 def answer_reward_function_gsm8k(response: str, gold_answer: str) -> float:
@@ -169,20 +169,19 @@ def answer_reward_function_gsm8k(response: str, gold_answer: str) -> float:
 
 def reward_function(response: str, question=None, answer=None, end_token=None):
     """
-    reward = 0.1 * format_reward + answer_reward
     where answer_reward is correctness of the GSM8K final answer
     """
 
     # keep your format reward unchanged
-    format_reward = format_reward_function("<think>" + response, end_token)
+    format_penalty = formatpenalty("<think>" + response, end_token)
 
     # GSM8K correctness reward
     answer_reward = answer_reward_function_gsm8k(response, gold_answer=answer)
 
     return {
-        "reward": 0.1 * format_reward + answer_reward,
+        "reward": format_penalty + answer_reward,
         "reward_info": {
-            "format_reward": format_reward,
+            "format_reward": format_penalty,
             "answer_reward": answer_reward,
         },
     }
