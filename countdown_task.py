@@ -10,18 +10,17 @@ from tokenizer import Tokenizer
 
 
 SYSTEM_MESSAGE = (
-    "You are a helpful assistant. You first think about the reasoning process "
-    "in your mind and then provide the user with the answer."
+    "You are a helpful assistant that solves math problems accurately."
 )
 
 USER_TEMPLATE = (
-    "Solve the following math word problem. "
-    "Show your reasoning inside <think></think> tags "
+    "Solve the following math word problem.\n"
+    "Provide your reasoning inside <think></think> tags, "
     "and put the final numeric answer inside <answer></answer> tags.\n\n"
     "Problem: {question}"
 )
 
-RESPONSE_PROMPT = "Let me solve this step by step.\n<think>"
+RESPONSE_PROMPT = "<think>"
 
 class GSM8KDataset(Dataset):
     """Unified dataset for GSM8K main and socratic splits."""

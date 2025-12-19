@@ -176,6 +176,7 @@ cython_debug/
 gsm8k/
 Countdown-Tasks-3to4/
 Qwen2.5-3B-Instruct/
+Qwen2.5-3B-base/
 ckpt/
 logs/
 wandb/
