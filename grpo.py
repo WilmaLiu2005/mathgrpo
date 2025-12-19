@@ -125,11 +125,38 @@ def rollout(
     return episodes
 
 
-def normalize_rewards_per_group(episodes: List[Episode]) -> List[Episode]:
-    """Normalize rewards per group. A group is defined by the prefix."""
+def normalize_rewards_per_group(episodes: List[Episode], use_length_grouping: bool = False) -> List[Episode]:
+    """Normalize rewards per group. A group is defined by the prefix (and optionally response length bucket)."""
     groups = defaultdict(list)
+    
+    if use_length_grouping:
+        # Compute length distribution statistics
+        lengths = [len(episode.generated_token_ids) for episode in episodes]
+        mean_length = np.mean(lengths)
+        std_length = np.std(lengths)
+        # Handle edge case where all lengths are the same (std = 0)
+        if std_length < 1e-6:
+            std_length = 1.0  # Use a small default std to avoid division issues
+        # Group by: < mean - sigma (short), mean - sigma to mean + sigma (medium), > mean + sigma (long)
+        lower_bound = mean_length - std_length
+        upper_bound = mean_length + std_length
+    
     for episode in episodes:
-        groups[tuple(episode.prefix)].append(episode)
+        if use_length_grouping:
+            # Determine length bucket based on normal distribution
+            length = len(episode.generated_token_ids)
+            if length < lower_bound:
+                bucket = "short"
+            elif length <= upper_bound:
+                bucket = "medium"
+            else:
+                bucket = "long"
+            key = (tuple(episode.prefix), bucket)
+        else:
+            key = tuple(episode.prefix)
+        
+        groups[key].append(episode)
+        
     output = []
     for group in groups.values():
         group_rewards = [item.reward for item in group]
@@ -147,6 +174,16 @@ def compute_entropy(logits: torch.Tensor) -> torch.Tensor:
     entropy = torch.logsumexp(logits, dim=-1) - torch.sum(probs * logits, dim=-1)
     return entropy
 
+def compute_kl_loss(model_logits: torch.Tensor, ref_logits: torch.Tensor) -> torch.Tensor:
+    """
+    Compute KL(p || q)
+    """
+    log_p = torch.nn.functional.log_softmax(model_logits, dim=-1)   # (B, L, K)
+    log_q = torch.nn.functional.log_softmax(ref_logits,  dim=-1)    # (B, L, K)
+    p = log_p.exp()    # (B, L, K)
+    # standard KL
+    kl = (p * (log_p - log_q)).sum(dim=-1)   # (B, L)
+    return kl
 
 def update_policy(
     model,
@@ -157,11 +194,34 @@ def update_policy(
     max_grad_norm: float,
     device: torch.device,
     dtype: torch.dtype,
+    ref_model=None,
     epsilon_low: float = 0.2,
     epsilon_high: float = 0.2,
+    kl_coeff: float = 0.0,
+    use_length_grouping: bool = False,
+    use_dynamic_clipping: bool = True,
+    use_kl_penalty: bool = False,
 ):
-    """Update the policy using the GRPO algorithm."""
-    episodes = normalize_rewards_per_group(episodes)
+    """Update the policy using the GRPO algorithm.
+    
+    Args:
+        model: The policy model to update
+        optimizer: Optimizer for the model
+        episodes: List of episodes from rollout
+        micro_batch_size: Size of micro batches
+        pad_token_id: Padding token ID
+        max_grad_norm: Maximum gradient norm for clipping
+        device: Device to run on
+        dtype: Data type
+        ref_model: Reference model for KL penalty (optional, required if use_kl_penalty=True)
+        epsilon_low: Lower bound epsilon for dynamic clipping
+        epsilon_high: Upper bound epsilon for dynamic clipping
+        kl_coeff: Coefficient for KL penalty (only used if use_kl_penalty=True)
+        use_length_grouping: Whether to use length-based grouping for reward normalization
+        use_dynamic_clipping: Whether to use dynamic clipping
+        use_kl_penalty: Whether to use KL penalty
+    """
+    episodes = normalize_rewards_per_group(episodes, use_length_grouping=use_length_grouping)
     # sort episodes by token length for efficient (micro-)batching
     episodes.sort(key=lambda x: len(x.prefix_token_ids) + len(x.generated_token_ids))
     num_micro_batches = math.ceil(len(episodes) / micro_batch_size)
@@ -213,6 +273,15 @@ def update_policy(
             target_masks = batch_masks[:, 1:]
             old_log_probs = batch_old_log_probs[:, 1:]
             logits = model.forward(input_token_ids).float()
+            
+            # Compute reference logits if KL penalty is enabled
+            if use_kl_penalty:
+                if ref_model is None:
+                    raise ValueError("ref_model must be provided when use_kl_penalty=True")
+                with torch.no_grad():
+                    ref_logits = ref_model.forward(input_token_ids).float()
+            else:
+                ref_logits = None
 
         log_probs = -torch.nn.functional.cross_entropy(
             logits.reshape(-1, logits.size(-1)),
@@ -221,36 +290,50 @@ def update_policy(
             reduction="none",
         ).reshape(input_token_ids.shape[0], -1)
 
+        # Compute KL loss if KL penalty is enabled
+        kl_loss = torch.tensor(0.0, device=device)
+        if use_kl_penalty and ref_logits is not None:
+            kl = compute_kl_loss(logits, ref_logits)
+            kl_loss = (kl * target_masks).sum() / num_target_tokens
+
         with torch.no_grad():
             token_entropy = compute_entropy(logits)
             entropy = entropy + (token_entropy * target_masks).sum() / num_target_tokens
 
-        # Importance Sampling with Dynamic Adaptive Clipping
-        ratio = torch.exp(log_probs - old_log_probs)
-        q_x = torch.exp(old_log_probs)
-        
-        # Dynamic bounds
-        # L(x) = 0.5 + 0.5 * sqrt(max(1 - 4*eps_low/q(x), 0))
-        val_low = 1 - 4 * epsilon_low / (q_x + 1e-10)
-        val_low = torch.clamp(val_low, min=0.0)
-        lower_bound = 0.5 + 0.5 * torch.sqrt(val_low)
-        
-        # U(x) = 0.5 + 0.5 * sqrt(1 + 4*eps_high/q(x))
-        val_high = 1 + 4 * epsilon_high / (q_x + 1e-10)
-        upper_bound = 0.5 + 0.5 * torch.sqrt(val_high)
-        
-        clipped_ratio = torch.clamp(ratio, min=lower_bound, max=upper_bound)
-        
+        # Compute objective based on selected method
         advantages = batch_advantages[:, None]
-        surr1 = ratio * advantages
-        surr2 = clipped_ratio * advantages
-        obj = torch.min(surr1, surr2)
-
-        # obj = log_probs * batch_advantages[:, None]
+        
+        if use_dynamic_clipping:
+            # Importance Sampling with Dynamic Adaptive Clipping
+            ratio = torch.exp(log_probs - old_log_probs)
+            q_x = torch.exp(old_log_probs)
+            
+            # Dynamic bounds
+            # L(x) = 0.5 + 0.5 * sqrt(max(1 - 4*eps_low/q(x), 0))
+            val_low = 1 - 4 * epsilon_low / (q_x + 1e-10)
+            val_low = torch.clamp(val_low, min=0.0)
+            lower_bound = 0.5 + 0.5 * torch.sqrt(val_low)
+            
+            # U(x) = 0.5 + 0.5 * sqrt(1 + 4*eps_high/q(x))
+            val_high = 1 + 4 * epsilon_high / (q_x + 1e-10)
+            upper_bound = 0.5 + 0.5 * torch.sqrt(val_high)
+            
+            clipped_ratio = torch.clamp(ratio, min=lower_bound, max=upper_bound)
+            
+            surr1 = ratio * advantages
+            surr2 = clipped_ratio * advantages
+            obj = torch.min(surr1, surr2)
+        else:
+            # Standard policy gradient (no clipping)
+            obj = log_probs * advantages
 
         # per-token objective
         obj = (obj * target_masks).sum() / num_target_tokens
         loss = -obj
+        
+        # Add KL penalty if enabled
+        if use_kl_penalty:
+            loss += kl_coeff * kl_loss
         loss.backward()
 
     # update the policy
@@ -259,8 +342,14 @@ def update_policy(
     )
     optimizer.step()
     optimizer.zero_grad(set_to_none=True)
-    return {
+    
+    result = {
         "loss": loss.item(),
         "grad_norm": grad_norm.item(),
         "entropy": entropy.item(),
     }
+    
+    if use_kl_penalty:
+        result["kl_loss"] = kl_loss.item() if isinstance(kl_loss, torch.Tensor) else kl_loss
+    
+    return result

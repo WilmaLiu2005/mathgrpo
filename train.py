@@ -15,8 +15,43 @@ from optimizer import MemoryEfficientAdamW
 from qwen2_model import Transformer
 from tokenizer import Tokenizer
 import wandb
+import random
+from copy import deepcopy
 
-def evaluate(model, tokenizer, device, dtype, config):
+def sample_trace_by_length_group(episodes):
+    groups = {"short": [], "medium": [], "long": []}
+    
+    # Compute length distribution statistics
+    lengths = [len(ep.generated_token_ids) for ep in episodes]
+    if len(lengths) > 0:
+        mean_length = np.mean(lengths)
+        std_length = np.std(lengths)
+        # Handle edge case where all lengths are the same (std = 0)
+        if std_length < 1e-6:
+            std_length = 1.0  # Use a small default std to avoid division issues
+        # Group by: < mean - sigma (short), mean - sigma to mean + sigma (medium), > mean + sigma (long)
+        lower_bound = mean_length - std_length
+        upper_bound = mean_length + std_length
+    else:
+        # Fallback if no episodes
+        lower_bound = 0
+        upper_bound = float('inf')
+    
+    for ep in episodes:
+        length = len(ep.generated_token_ids)
+        if length < lower_bound:
+            groups["short"].append(ep)
+        elif length <= upper_bound:
+            groups["medium"].append(ep)
+        else:
+            groups["long"].append(ep)
+    sampled = {}
+    for k, v in groups.items():
+        if v:
+            sampled[k] = random.choice(v)
+    return sampled
+
+def evaluate(model, tokenizer, device, dtype, config, global_step):
     test_dataset = GSM8KDataset(
         data_path=config["data"]["path"],
         tokenizer=tokenizer,
@@ -34,6 +69,8 @@ def evaluate(model, tokenizer, device, dtype, config):
         drop_last=False,
     )
     success = []
+    lengths = []
+    all_episodes = []
     for batch in dataloader:
         episodes = rollout(
             model=model,
@@ -45,8 +82,16 @@ def evaluate(model, tokenizer, device, dtype, config):
             device=device,
             dtype=dtype,
         )
+        all_episodes.extend(episodes)
         success.extend([episode.reward_info["answer_reward"] for episode in episodes])
-    return np.mean(success)
+        lengths.extend([len(episode.generated_token_ids) for episode in episodes])
+        
+    # 采样trace
+    sampled_traces = sample_trace_by_length_group(all_episodes)
+    for group, ep in sampled_traces.items():
+        print(f"[{group}] trace: {ep.text[:200]} ...")  # 只打印前200字符
+        wandb.log({f"eval_trace/{group}": wandb.Html(f"<pre>{ep.text}</pre>")}, step=global_step)
+    return np.mean(success), np.mean(lengths)
 
 def main(config_path: str):
     with open(config_path, "r") as f:
@@ -56,8 +101,9 @@ def main(config_path: str):
     # Init wandb
     # ---------------------------
     wandb.init(
-        project=config["training"].get("wandb_project", "mathgrpo"),
-        name=config["training"].get("wandb_run_name", "first_time"),
+        project=config["wandb"].get("project", "mathgrpo"),
+        name=config["wandb"].get("run_name", "baseline"),
+        mode=config["wandb"].get("mode", "online"),
         config=config
     )
 
@@ -104,6 +150,17 @@ def main(config_path: str):
     )
 
     model = Transformer.from_pretrained(pretrained_model_path, device=device).train()
+
+    # Create reference model only if KL penalty is enabled
+    use_kl_penalty = config["training"].get("use_kl_penalty", False)
+    if use_kl_penalty:
+        ref_model = deepcopy(model)
+        ref_model.eval()
+        for p in ref_model.parameters():
+            p.requires_grad = False
+    else:
+        ref_model = None    
+
     optimizer = MemoryEfficientAdamW(
         model.parameters(),
         lr=config["training"]["learning_rate"],
@@ -153,8 +210,13 @@ def main(config_path: str):
                 max_grad_norm=config["training"]["max_grad_norm"],
                 device=device,
                 dtype=dtype,
+                ref_model=ref_model,
                 epsilon_low=config["training"].get("epsilon_low", 0.2),
                 epsilon_high=config["training"].get("epsilon_high", 0.2),
+                kl_coeff=config["training"].get("kl_coeff", 0.05),
+                use_length_grouping=config["training"].get("use_length_grouping", False),
+                use_dynamic_clipping=config["training"].get("use_dynamic_clipping", True),
+                use_kl_penalty=config["training"].get("use_kl_penalty", False),
             )
 
             torch.cuda.synchronize()
@@ -176,6 +238,7 @@ def main(config_path: str):
             entropy = results["entropy"]
             lr = optimizer.param_groups[0]["lr"]
             loss = results["loss"]
+            kl_loss = results.get("kl_loss", 0.0)  # Only present if use_kl_penalty=True
             mean_response_len = float(np.mean([len(ep.generated_token_ids) for ep in episodes])) if episodes else 0.0
 
             print(
@@ -190,13 +253,16 @@ def main(config_path: str):
 
             # Eval 按 global_step 触发
             if global_step % config["training"]["eval_interval"] == 0:
-                eval_success_rate = evaluate(model, tokenizer, device, dtype, config)
-                print(f"\rEval success rate: {eval_success_rate:.2f}" + " " * 100)
+                eval_success_rate, eval_mean_len = evaluate(model, tokenizer, device, dtype, config, global_step)
+                print(f"\rEval success rate: {eval_success_rate:.2f}, Eval mean len: {eval_mean_len:.2f}" + " " * 100)
                 tb_writer.add_scalar("success_rate/eval", eval_success_rate, global_step)
-                wandb.log({"success_rate/eval": float(eval_success_rate)}, step=global_step)
+                tb_writer.add_scalar("mean_response_len/eval", eval_mean_len, global_step)
+                wandb.log({"success_rate/eval": float(eval_success_rate), "mean_response_len/eval": float(eval_mean_len)}, step=global_step)
 
             # TensorBoard（用 global_step）
             tb_writer.add_scalar("loss", loss, global_step)
+            if use_kl_penalty:
+                tb_writer.add_scalar("kl_loss", kl_loss, global_step)
             tb_writer.add_scalar("mean_reward", mean_reward, global_step)
             tb_writer.add_scalar("std_reward", std_reward, global_step)
             tb_writer.add_scalar("success_rate/train", success_rate, global_step)
@@ -209,7 +275,7 @@ def main(config_path: str):
             tb_writer.add_scalar("entropy", entropy, global_step)
 
             # Wandb（用 global_step）
-            wandb.log({
+            log_dict = {
                 "loss": loss,
                 "mean_reward": mean_reward,
                 "std_reward": std_reward,
@@ -221,7 +287,10 @@ def main(config_path: str):
                 "learning_rate": lr,
                 "mean_response_len": mean_response_len,
                 "entropy": entropy,
-            }, step=global_step)
+            }
+            if use_kl_penalty:
+                log_dict["kl_loss"] = kl_loss
+            wandb.log(log_dict, step=global_step)
 
             # 文本样例（用 global_step）
             for i, ep in enumerate(episodes):
