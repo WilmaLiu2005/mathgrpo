@@ -80,6 +80,7 @@ def evaluate(model, tokenizer, device, dtype, config, global_step):
             reward_function=reward_function,
             device=device,
             dtype=dtype,
+            temperature=config["training"].get("temperature", 1.0),
         )
         all_episodes.extend(episodes)
         success.extend([episode.reward_info["answer_reward"] for episode in episodes])
@@ -184,6 +185,7 @@ def main(config_path: str):
                 reward_function=reward_function,
                 device=device,
                 dtype=dtype,
+                temperature=config["training"].get("temperature", 1.0),
             )
 
             if config["training"]["skip_unfinished_episodes"]:

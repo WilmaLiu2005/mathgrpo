@@ -14,6 +14,9 @@ training:
   # GSM8K 题目较长，把 prompt 长度稍微调大
   max_prompt_len: 512
   max_gen_len: 1024
+  
+  # 采样参数
+  temperature: 1.2            # 采样温度，控制随机性（1.0=标准采样，>1.0=更随机，<1.0=更确定）
 
   batch_size: 256
   num_questions_per_batch: 32
