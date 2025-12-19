@@ -15,7 +15,6 @@ from optimizer import MemoryEfficientAdamW
 from qwen2_model import Transformer
 from tokenizer import Tokenizer
 import wandb
-import random
 from copy import deepcopy
 
 def sample_trace_by_length_group(episodes):
