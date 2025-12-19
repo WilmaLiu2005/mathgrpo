@@ -15,8 +15,9 @@ training:
   max_prompt_len: 512
   max_gen_len: 512
 
-  batch_size: 32
-  num_questions_per_batch: 16
+  batch_size: 16              # 总 episode 数 = num_questions_per_batch × num_answers_per_question
+  num_questions_per_batch: 1   # 每个 batch 的问题数（每个 batch 只处理一个问题）
+  # 每个问题采样答案数 = batch_size / num_questions_per_batch = 16 / 1 = 16
 
   micro_batch_size: 2
   max_grad_norm: 1.0
