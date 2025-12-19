@@ -12,6 +12,7 @@ class Episode:
     is_finished: bool
     reward: float
     reward_info: Dict[str, float]
+    old_log_probs: List[float] = field(default_factory=list)  # Log probabilities from rollout (for importance sampling)
 
 @dataclass
 class MiniBatch:

@@ -1,6 +1,6 @@
 model:
   pretrained_model_path: "Qwen2.5-3B-Instruct"
-  device: "cuda:2"
+  device: "cuda"
   dtype: "bfloat16"
 
 data:
@@ -40,8 +40,20 @@ training:
   max_steps: null      # 限制总步数（全局 step 计数）。例如 2000；设为 null/0/不写表示不限制
 
   # GRPO 算法相关配置
-  kl_coeff: 0          # KL 散度正则项系数。设为 0 表示不使用 KL 正则项，大于 0 则启用
-  use_length_grouping: true  # 是否开启长度分组：true 表示按响应长度分组进行奖励归一化，false 表示仅按 prefix 分组
+  # Dynamic Clipping 参数
+  use_dynamic_clipping: true   # 是否使用 dynamic clipping（true=动态裁剪，false=固定裁剪PPO风格）
+  epsilon_low: 0.3              # Dynamic clipping 下界参数
+  epsilon_high: 0.3             # Dynamic clipping 上界参数
+  
+  # 固定值 Clipping 参数（当 use_dynamic_clipping=false 时使用）
+  clip_ratio: 0.2               # PPO-style 固定 clip ratio（0.0=不使用裁剪，0.2 表示 [0.8, 1.2]）
+  
+  # KL 散度正则化参数
+  use_kl_penalty: false         # 是否使用 KL 散度正则化
+  kl_coeff: 0.05                # KL 散度正则项系数（仅在 use_kl_penalty=true 时生效）
+  
+  # Reward 归一化参数
+  use_length_grouping: true     # 是否使用长度分组进行 reward 归一化
   
 wandb:
   enable: true
