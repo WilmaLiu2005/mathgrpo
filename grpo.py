@@ -22,6 +22,7 @@ def rollout(
     reward_function: Callable,
     device: torch.device,
     dtype: torch.dtype,
+    temperature: float = 1.0,
 ) -> List[Episode]:
     end_token = tokenizer.eos_token
     end_token_id = tokenizer.eos_token_id
@@ -58,7 +59,9 @@ def rollout(
         )
         with torch.autocast(device_type=device.type, dtype=dtype):
             logits = model.inference(tokens[:, prev_pos:cur_pos], prev_pos)
-        probs = torch.softmax(logits[:, -1], dim=-1)
+        # Apply temperature scaling
+        scaled_logits = logits[:, -1] / temperature
+        probs = torch.softmax(scaled_logits, dim=-1)
         next_token = torch.multinomial(probs, num_samples=1)
         next_token = next_token.reshape(-1)
         next_token = torch.where(
