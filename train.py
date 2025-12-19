@@ -153,8 +153,8 @@ def main(config_path: str):
                 max_grad_norm=config["training"]["max_grad_norm"],
                 device=device,
                 dtype=dtype,
-                epsilon_low=config["training"].get("epsilon_low"),
-                epsilon_high=config["training"].get("epsilon_high"),
+                epsilon_low=config["training"].get("epsilon_low", 0.2),
+                epsilon_high=config["training"].get("epsilon_high", 0.2),
             )
 
             torch.cuda.synchronize()
