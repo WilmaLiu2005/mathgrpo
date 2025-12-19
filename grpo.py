@@ -39,6 +39,7 @@ def rollout(
         dtype=dtype,
     )
     tokens = torch.full((bsz, total_len), pad_token_id, dtype=torch.long, device=device)
+    token_log_probs = torch.zeros((bsz, total_len), dtype=torch.float, device=device)
     for k, t in enumerate(prefix_token_ids):
         offset = k * num_answer_per_question
         for i in range(num_answer_per_question):
@@ -59,14 +60,25 @@ def rollout(
         )
         with torch.autocast(device_type=device.type, dtype=dtype):
             logits = model.inference(tokens[:, prev_pos:cur_pos], prev_pos)
-        # Apply temperature scaling
+        
+        # Compute log probabilities WITHOUT temperature (for importance sampling)
+        log_probs_all = torch.log_softmax(logits[:, -1], dim=-1)
+        
+        # Apply temperature scaling ONLY for sampling
         scaled_logits = logits[:, -1] / temperature
-        probs = torch.softmax(scaled_logits, dim=-1)
+        scaled_log_probs = torch.log_softmax(scaled_logits, dim=-1)
+        probs = torch.exp(scaled_log_probs)
         next_token = torch.multinomial(probs, num_samples=1)
         next_token = next_token.reshape(-1)
+        
         next_token = torch.where(
             input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token
         )
+        
+        # Store log probabilities WITHOUT temperature (for importance sampling ratio)
+        selected_log_probs = log_probs_all.gather(1, next_token.unsqueeze(1)).squeeze(1)
+        token_log_probs[:, cur_pos] = selected_log_probs
+        
         # if an rollout is finished, we fill the rest of the tokens with pad_token_id
         next_token = torch.where(is_finished, pad_token_id, next_token)
         tokens[:, cur_pos] = next_token
@@ -82,6 +94,7 @@ def rollout(
     torch.cuda.empty_cache()
     is_finished_list = is_finished.tolist()
     tokens_list = tokens.tolist()
+    token_log_probs_list = token_log_probs.tolist()
 
     # prepare the output episodes
     episodes = []
@@ -89,11 +102,12 @@ def rollout(
         for j in range(num_answer_per_question):
             idx = i * num_answer_per_question + j
             generated_token_ids = tokens_list[idx][len(batch.prefix_token_ids[i]) :]
+            generated_log_probs = token_log_probs_list[idx][len(batch.prefix_token_ids[i]) :]
             # remove padding tokens
             if pad_token_id in generated_token_ids:
-                generated_token_ids = generated_token_ids[
-                    : generated_token_ids.index(pad_token_id)
-                ]
+                pad_idx = generated_token_ids.index(pad_token_id)
+                generated_token_ids = generated_token_ids[:pad_idx]
+                generated_log_probs = generated_log_probs[:pad_idx]
             generated_text = tokenizer.detokenize(generated_token_ids)
             rewards = reward_function(
                 response=generated_text,
@@ -107,6 +121,7 @@ def rollout(
                 prefix_token_ids=batch.prefix_token_ids[i],
                 prefix_tokens=batch.prefix_tokens[i],
                 generated_token_ids=generated_token_ids,
+                old_log_probs=generated_log_probs,
                 is_finished=is_finished_list[idx],
                 reward=rewards["reward"],
                 reward_info=rewards["reward_info"],
@@ -179,7 +194,6 @@ def compute_kl_loss(model_logits: torch.Tensor, ref_logits: torch.Tensor) -> tor
 
 def update_policy(
     model,
-    ref_model, 
     optimizer,
     episodes: List[Episode],
     micro_batch_size: int,
@@ -187,16 +201,48 @@ def update_policy(
     max_grad_norm: float,
     device: torch.device,
     dtype: torch.dtype,
-    kl_coeff: float = 0.05,
+    ref_model=None,
+    epsilon_low: float = 0.2,
+    epsilon_high: float = 0.2,
+    kl_coeff: float = 0.0,
     use_length_grouping: bool = False,
+    use_dynamic_clipping: bool = True,
+    use_kl_penalty: bool = False,
+    clip_ratio: float = 0.2,
 ):
-    """Update the policy using the GRPO algorithm."""
+    """Update the policy using the GRPO algorithm.
+    
+    Args:
+        model: The policy model to update
+        optimizer: Optimizer for the model
+        episodes: List of episodes from rollout
+        micro_batch_size: Size of micro batches
+        pad_token_id: Padding token ID
+        max_grad_norm: Maximum gradient norm for clipping
+        device: Device to run on
+        dtype: Data type
+        ref_model: Reference model for KL penalty (optional, required if use_kl_penalty=True)
+        epsilon_low: Lower bound epsilon for dynamic clipping
+        epsilon_high: Upper bound epsilon for dynamic clipping
+        kl_coeff: Coefficient for KL penalty (only used if use_kl_penalty=True)
+        use_length_grouping: Whether to use length-based grouping for reward normalization
+        use_dynamic_clipping: Whether to use dynamic clipping
+        use_kl_penalty: Whether to use KL penalty
+        clip_ratio: Fixed clip ratio for PPO-style clipping (when use_dynamic_clipping=False)
+    """
     episodes = normalize_rewards_per_group(episodes, use_length_grouping=use_length_grouping)
     # sort episodes by token length for efficient (micro-)batching
     episodes.sort(key=lambda x: len(x.prefix_token_ids) + len(x.generated_token_ids))
     num_micro_batches = math.ceil(len(episodes) / micro_batch_size)
     num_target_tokens = sum(len(episode.generated_token_ids) for episode in episodes)
     entropy = 0.0
+    total_clip_stats = {
+        "clipped_lower": 0,
+        "clipped_upper": 0,
+        "total": 0,
+        "ratio_sum": 0.0,
+        "clipped_ratio_sum": 0.0,
+    }
 
     for i in range(0, len(episodes), micro_batch_size):
         print(
@@ -217,6 +263,12 @@ def update_policy(
             + [pad_token_id] * (batch_max_length - batch_lengths[i])
             for i, episode in enumerate(batch_episodes)
         ]
+        batch_old_log_probs = [
+            [0.0] * len(episode.prefix_token_ids)
+            + episode.old_log_probs
+            + [0.0] * (batch_max_length - batch_lengths[i])
+            for i, episode in enumerate(batch_episodes)
+        ]
         batch_masks = [
             [0] * len(episode.prefix_token_ids)
             + [1] * len(episode.generated_token_ids)
@@ -225,6 +277,7 @@ def update_policy(
         ]
         batch_advantages = [episode.reward for episode in batch_episodes]
         batch_token_ids = torch.tensor(batch_token_ids, device=device, dtype=torch.long)
+        batch_old_log_probs = torch.tensor(batch_old_log_probs, device=device, dtype=torch.float32)
         batch_masks = torch.tensor(batch_masks, device=device, dtype=torch.bool)
         batch_advantages = torch.tensor(
             batch_advantages, device=device, dtype=torch.float32
@@ -234,9 +287,17 @@ def update_policy(
             input_token_ids = batch_token_ids[:, :-1]
             target_token_ids = batch_token_ids[:, 1:]
             target_masks = batch_masks[:, 1:]
+            old_log_probs = batch_old_log_probs[:, 1:]
             logits = model.forward(input_token_ids).float()
-            with torch.no_grad():
-                ref_logits = ref_model.forward(input_token_ids).float()
+            
+            # Compute reference logits if KL penalty is enabled
+            if use_kl_penalty:
+                if ref_model is None:
+                    raise ValueError("ref_model must be provided when use_kl_penalty=True")
+                with torch.no_grad():
+                    ref_logits = ref_model.forward(input_token_ids).float()
+            else:
+                ref_logits = None
 
         log_probs = -torch.nn.functional.cross_entropy(
             logits.reshape(-1, logits.size(-1)),
@@ -245,18 +306,101 @@ def update_policy(
             reduction="none",
         ).reshape(input_token_ids.shape[0], -1)
 
-        kl = compute_kl_loss(logits, ref_logits)
-        kl_loss = (kl * target_masks).sum() / num_target_tokens
+        # Compute KL loss if KL penalty is enabled
+        kl_loss = torch.tensor(0.0, device=device)
+        if use_kl_penalty and ref_logits is not None:
+            kl = compute_kl_loss(logits, ref_logits)
+            kl_loss = (kl * target_masks).sum() / num_target_tokens
 
         with torch.no_grad():
             token_entropy = compute_entropy(logits)
             entropy = entropy + (token_entropy * target_masks).sum() / num_target_tokens
 
-        obj = log_probs * batch_advantages[:, None]
+        # Compute objective based on selected method
+        advantages = batch_advantages[:, None]
+        
+        clip_stats = {
+            "clipped_lower": 0,
+            "clipped_upper": 0,
+            "total": 0,
+            "ratio_sum": 0.0,
+            "clipped_ratio_sum": 0.0,
+        }
+        
+        if use_dynamic_clipping:
+            # Importance Sampling with Dynamic Adaptive Clipping
+            ratio = torch.exp(log_probs - old_log_probs)
+            q_x = torch.exp(old_log_probs)
+            
+            # Dynamic bounds
+            # L(x) = 0.5 + 0.5 * sqrt(max(1 - 4*eps_low/q(x), 0))
+            val_low = 1 - 4 * epsilon_low / (q_x + 1e-10)
+            val_low = torch.clamp(val_low, min=0.0)
+            lower_bound = 0.5 + 0.5 * torch.sqrt(val_low)
+            
+            # U(x) = 0.5 + 0.5 * sqrt(1 + 4*eps_high/q(x))
+            val_high = 1 + 4 * epsilon_high / (q_x + 1e-10)
+            upper_bound = 0.5 + 0.5 * torch.sqrt(val_high)
+            
+            # Track clipping statistics
+            clipped_lower = (ratio < lower_bound).sum().item()
+            clipped_upper = (ratio > upper_bound).sum().item()
+            total_tokens = ratio.numel()
+            clip_stats = {
+                "clipped_lower": clipped_lower,
+                "clipped_upper": clipped_upper,
+                "total": total_tokens
+            }
+            
+            clipped_ratio = torch.clamp(ratio, min=lower_bound, max=upper_bound)
+            clip_stats["ratio_sum"] = ratio.sum().item()
+            clip_stats["clipped_ratio_sum"] = clipped_ratio.sum().item()
+            
+            surr1 = ratio * advantages
+            surr2 = clipped_ratio * advantages
+            obj = torch.min(surr1, surr2)
+        else:
+            # PPO-style fixed clipping (only if clip_ratio > 0)
+            if clip_ratio > 0.0:
+                ratio = torch.exp(log_probs - old_log_probs)
+                clip_lower = 1.0 - clip_ratio
+                clip_upper = 1.0 + clip_ratio
+            
+                # Track clipping statistics
+                clipped_lower = (ratio < clip_lower).sum().item()
+                clipped_upper = (ratio > clip_upper).sum().item()
+                total_tokens = ratio.numel()
+                clip_stats = {
+                    "clipped_lower": clipped_lower,
+                    "clipped_upper": clipped_upper,
+                    "total": total_tokens,
+                    "ratio_sum": ratio.sum().item(),
+                }
+            
+                clipped_ratio = torch.clamp(ratio, min=clip_lower, max=clip_upper)
+                clip_stats["clipped_ratio_sum"] = clipped_ratio.sum().item()
+            
+                surr1 = ratio * advantages
+                surr2 = clipped_ratio * advantages
+                obj = torch.min(surr1, surr2)
+            else:
+                # No clipping: use original GRPO objective
+                obj = log_probs * advantages
+
+        # Accumulate clip statistics (both for dynamic and fixed clipping)
+        total_clip_stats["clipped_lower"] += clip_stats["clipped_lower"]
+        total_clip_stats["clipped_upper"] += clip_stats["clipped_upper"]
+        total_clip_stats["total"] += clip_stats["total"]
+        total_clip_stats["ratio_sum"] += clip_stats["ratio_sum"]
+        total_clip_stats["clipped_ratio_sum"] += clip_stats["clipped_ratio_sum"]
+
         # per-token objective
         obj = (obj * target_masks).sum() / num_target_tokens
         loss = -obj
-        loss += kl_coeff * kl_loss
+        
+        # Add KL penalty if enabled
+        if use_kl_penalty:
+            loss += kl_coeff * kl_loss
         loss.backward()
 
     # update the policy
@@ -265,9 +409,29 @@ def update_policy(
     )
     optimizer.step()
     optimizer.zero_grad(set_to_none=True)
-    return {
+    
+    result = {
         "loss": loss.item(),
-        "kl_loss": kl_loss.mean().item(),
         "grad_norm": grad_norm.item(),
         "entropy": entropy.item(),
     }
+    
+    if use_kl_penalty:
+        result["kl_loss"] = kl_loss.item() if isinstance(kl_loss, torch.Tensor) else kl_loss
+    
+    # Return clip statistics (both for dynamic and fixed clipping)
+    total_tokens = total_clip_stats["total"]
+    if total_tokens > 0:
+        result["clip_frac_lower"] = total_clip_stats["clipped_lower"] / total_tokens
+        result["clip_frac_upper"] = total_clip_stats["clipped_upper"] / total_tokens
+        result["clip_frac_total"] = (total_clip_stats["clipped_lower"] + total_clip_stats["clipped_upper"]) / total_tokens
+        result["mean_ratio"] = total_clip_stats["ratio_sum"] / total_tokens
+        result["mean_clipped_ratio"] = total_clip_stats["clipped_ratio_sum"] / total_tokens
+    else:
+        result["clip_frac_lower"] = 0.0
+        result["clip_frac_upper"] = 0.0
+        result["clip_frac_total"] = 0.0
+        result["mean_ratio"] = 0.0
+        result["mean_clipped_ratio"] = 0.0
+    
+    return result

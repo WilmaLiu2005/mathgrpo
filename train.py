@@ -193,7 +193,6 @@ def main(config_path: str):
 
             results = update_policy(
                 model=model,
-                ref_model=ref_model,
                 optimizer=optimizer,
                 episodes=episodes,
                 micro_batch_size=config["training"]["micro_batch_size"],
@@ -201,8 +200,14 @@ def main(config_path: str):
                 max_grad_norm=config["training"]["max_grad_norm"],
                 device=device,
                 dtype=dtype,
-                kl_coeff=config["training"].get("kl_coeff", 0.05),
-                use_length_grouping=config["training"].get("use_length_grouping", False)
+                ref_model=ref_model if config["training"].get("use_kl_penalty", False) else None,
+                epsilon_low=config["training"].get("epsilon_low", 0.2),
+                epsilon_high=config["training"].get("epsilon_high", 0.2),
+                kl_coeff=config["training"].get("kl_coeff", 0.0),
+                use_length_grouping=config["training"].get("use_length_grouping", False),
+                use_dynamic_clipping=config["training"].get("use_dynamic_clipping", True),
+                use_kl_penalty=config["training"].get("use_kl_penalty", False),
+                clip_ratio=config["training"].get("clip_ratio", 0.2),
             )
 
             torch.cuda.synchronize()
@@ -224,8 +229,14 @@ def main(config_path: str):
             entropy = results["entropy"]
             lr = optimizer.param_groups[0]["lr"]
             loss = results["loss"]
-            kl_loss = results["kl_loss"]
+            kl_loss = results.get("kl_loss", 0.0)
             mean_response_len = float(np.mean([len(ep.generated_token_ids) for ep in episodes])) if episodes else 0.0
+            
+            # Clip statistics
+            clip_frac_lower = results.get("clip_frac_lower", 0.0)
+            clip_frac_upper = results.get("clip_frac_upper", 0.0)
+            clip_frac_total = results.get("clip_frac_total", 0.0)
+            mean_ratio = results.get("mean_ratio", 0.0)
 
             print(
                 f"\rEpoch {epoch}, step {global_step}, "
@@ -247,7 +258,8 @@ def main(config_path: str):
 
             # TensorBoard（用 global_step）
             tb_writer.add_scalar("loss", loss, global_step)
-            tb_writer.add_scalar("kl_loss", kl_loss, global_step)
+            if kl_loss > 0:
+                tb_writer.add_scalar("kl_loss", kl_loss, global_step)
             tb_writer.add_scalar("mean_reward", mean_reward, global_step)
             tb_writer.add_scalar("std_reward", std_reward, global_step)
             tb_writer.add_scalar("success_rate/train", success_rate, global_step)
@@ -258,11 +270,15 @@ def main(config_path: str):
             tb_writer.add_scalar("learning_rate", lr, global_step)
             tb_writer.add_scalar("mean_response_len", mean_response_len, global_step)
             tb_writer.add_scalar("entropy", entropy, global_step)
+            # Clip statistics
+            tb_writer.add_scalar("clip_frac_lower", clip_frac_lower, global_step)
+            tb_writer.add_scalar("clip_frac_upper", clip_frac_upper, global_step)
+            tb_writer.add_scalar("clip_frac_total", clip_frac_total, global_step)
+            tb_writer.add_scalar("mean_ratio", mean_ratio, global_step)
 
             # Wandb（用 global_step）
-            wandb.log({
+            log_dict = {
                 "loss": loss,
-                "kl_loss": kl_loss,
                 "mean_reward": mean_reward,
                 "std_reward": std_reward,
                 "success_rate/train": success_rate,
@@ -273,7 +289,14 @@ def main(config_path: str):
                 "learning_rate": lr,
                 "mean_response_len": mean_response_len,
                 "entropy": entropy,
-            }, step=global_step)
+                "clip_frac_lower": clip_frac_lower,
+                "clip_frac_upper": clip_frac_upper,
+                "clip_frac_total": clip_frac_total,
+                "mean_ratio": mean_ratio,
+            }
+            if kl_loss > 0:
+                log_dict["kl_loss"] = kl_loss
+            wandb.log(log_dict, step=global_step)
 
             # 文本样例（用 global_step）
             for i, ep in enumerate(episodes):
