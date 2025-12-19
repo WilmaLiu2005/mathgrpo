@@ -41,7 +41,7 @@ training:
 
   # GRPO 算法相关配置
   # Dynamic Clipping 参数
-  use_dynamic_clipping: true   # 是否使用 dynamic clipping（true=动态裁剪，false=固定裁剪PPO风格）
+  use_dynamic_clipping: false   # 是否使用 dynamic clipping（true=动态裁剪，false=固定裁剪PPO风格）
   epsilon_low: 0.3              # Dynamic clipping 下界参数
   epsilon_high: 0.3             # Dynamic clipping 上界参数
   
