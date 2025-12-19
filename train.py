@@ -50,6 +50,69 @@ def sample_trace_by_length_group(episodes):
             sampled[k] = random.choice(v)
     return sampled
 
+def save_rollout_samples(model, tokenizer, device, dtype, config, ckpt_dir, global_step):
+    """Save rollout samples when saving checkpoint (one sample per question)."""
+    import json
+    
+    # Load a small subset of test data for sampling
+    test_dataset = GSM8KDataset(
+        data_path=config["data"]["path"],
+        tokenizer=tokenizer,
+        split="test",
+        config_name=config["data"].get("config_name", "main"),
+        test_size=min(20, config["data"]["test_size"]),  # Sample up to 20 questions
+    )
+    generator = torch.Generator(device=device)
+    dataloader = DataLoader(
+        test_dataset,
+        shuffle=False,
+        collate_fn=GSM8KDataset.collate_fn,
+        generator=generator,
+        batch_size=1,  # One question per batch
+        drop_last=False,
+    )
+    
+    samples = []
+    for batch in dataloader:
+        episodes = rollout(
+            model=model,
+            tokenizer=tokenizer,
+            batch=batch,
+            max_gen_len=config["training"]["max_gen_len"],
+            num_answer_per_question=1,  # One sample per question
+            reward_function=reward_function,
+            device=device,
+            dtype=dtype,
+            temperature=config["training"].get("temperature", 1.0),
+        )
+        
+        if episodes:
+            ep = episodes[0]
+            samples.append({
+                "question": batch.questions[0] if batch.questions else "",
+                "gold_answer": batch.answers[0] if batch.answers else "",
+                "generated_text": ep.text,
+                "reward": ep.reward,
+                "answer_reward": ep.reward_info.get("answer_reward", 0.0),
+                "format_penalty": ep.reward_info.get("format_penalty", 0.0),
+                "is_finished": ep.is_finished,
+            })
+    
+    # Save to JSON file
+    output_file = ckpt_dir / f"rollout_samples_{global_step:06d}.json"
+    with open(output_file, "w", encoding="utf-8") as f:
+        json.dump(samples, f, ensure_ascii=False, indent=2)
+    print(f"Saved rollout samples to {output_file}")
+    
+    # Also log to wandb as a table
+    if len(samples) > 0:
+        import pandas as pd
+        df = pd.DataFrame(samples)
+        wandb.log({
+            f"rollout_samples/step_{global_step}": wandb.Table(dataframe=df)
+        }, step=global_step)
+
+
 def evaluate(model, tokenizer, device, dtype, config, global_step):
     test_dataset = GSM8KDataset(
         data_path=config["data"]["path"],
@@ -80,6 +143,7 @@ def evaluate(model, tokenizer, device, dtype, config, global_step):
             reward_function=reward_function,
             device=device,
             dtype=dtype,
+            temperature=config["training"].get("temperature", 1.0),
         )
         all_episodes.extend(episodes)
         success.extend([episode.reward_info["answer_reward"] for episode in episodes])
@@ -195,6 +259,7 @@ def main(config_path: str):
                 reward_function=reward_function,
                 device=device,
                 dtype=dtype,
+                temperature=config["training"].get("temperature", 1.0),
             )
 
             if config["training"]["skip_unfinished_episodes"]:
@@ -216,6 +281,7 @@ def main(config_path: str):
                 use_length_grouping=config["training"].get("use_length_grouping", False),
                 use_dynamic_clipping=config["training"].get("use_dynamic_clipping", True),
                 use_kl_penalty=config["training"].get("use_kl_penalty", False),
+                clip_ratio=config["training"].get("clip_ratio", 0.2),
             )
 
             torch.cuda.synchronize()
@@ -226,13 +292,13 @@ def main(config_path: str):
             # 统计与打印（用 global_step）
             reward = [ep.reward for ep in episodes]
             answer_reward = [ep.reward_info["answer_reward"] for ep in episodes]
-            format_reward_list = [ep.reward_info["format_reward"] for ep in episodes]
+            format_penalty_list = [ep.reward_info["format_penalty"] for ep in episodes]
             num_finished_episodes = sum(ep.is_finished for ep in episodes)
 
             mean_reward = float(np.mean(reward)) if reward else 0.0
             std_reward = float(np.std(reward)) if reward else 0.0
             success_rate = float(np.mean(answer_reward)) if answer_reward else 0.0
-            mean_format_reward = float(np.mean(format_reward_list)) if format_reward_list else 0.0
+            mean_format_penalty = float(np.mean(format_penalty_list)) if format_penalty_list else 0.0
             grad_norm = results["grad_norm"]
             entropy = results["entropy"]
             lr = optimizer.param_groups[0]["lr"]
@@ -265,7 +331,7 @@ def main(config_path: str):
             tb_writer.add_scalar("mean_reward", mean_reward, global_step)
             tb_writer.add_scalar("std_reward", std_reward, global_step)
             tb_writer.add_scalar("success_rate/train", success_rate, global_step)
-            tb_writer.add_scalar("format_reward", mean_format_reward, global_step)
+            tb_writer.add_scalar("format_penalty", mean_format_penalty, global_step)
             tb_writer.add_scalar("grad_norm", grad_norm, global_step)
             tb_writer.add_scalar("duration", duration, global_step)
             tb_writer.add_scalar("num_finished_episodes", num_finished_episodes, global_step)
@@ -279,7 +345,7 @@ def main(config_path: str):
                 "mean_reward": mean_reward,
                 "std_reward": std_reward,
                 "success_rate/train": success_rate,
-                "format_reward": mean_format_reward,
+                "format_penalty": mean_format_penalty,
                 "grad_norm": grad_norm,
                 "duration": duration,
                 "num_finished_episodes": num_finished_episodes,
@@ -289,6 +355,22 @@ def main(config_path: str):
             }
             if use_kl_penalty:
                 log_dict["kl_loss"] = kl_loss
+            # Add clip ratios (both for dynamic and fixed clipping)
+            clip_frac_lower = results.get("clip_frac_lower", 0.0)
+            clip_frac_upper = results.get("clip_frac_upper", 0.0)
+            clip_frac_total = results.get("clip_frac_total", 0.0)
+            mean_ratio = results.get("mean_ratio", 0.0)
+            mean_clipped_ratio = results.get("mean_clipped_ratio", 0.0)
+            log_dict["clip_frac/lower"] = clip_frac_lower
+            log_dict["clip_frac/upper"] = clip_frac_upper
+            log_dict["clip_frac/total"] = clip_frac_total
+            log_dict["clip_ratio/mean_raw"] = mean_ratio
+            log_dict["clip_ratio/mean_clipped"] = mean_clipped_ratio
+            tb_writer.add_scalar("clip_frac/lower", clip_frac_lower, global_step)
+            tb_writer.add_scalar("clip_frac/upper", clip_frac_upper, global_step)
+            tb_writer.add_scalar("clip_frac/total", clip_frac_total, global_step)
+            tb_writer.add_scalar("clip_ratio/mean_raw", mean_ratio, global_step)
+            tb_writer.add_scalar("clip_ratio/mean_clipped", mean_clipped_ratio, global_step)
             wandb.log(log_dict, step=global_step)
 
             # 文本样例（用 global_step）
@@ -301,6 +383,18 @@ def main(config_path: str):
                 output_file = ckpt_dir / f"ckpt_{global_step:06d}.pt"
                 torch.save(model.state_dict(), output_file)
                 print(f"Saved checkpoint to {output_file}")
+                
+                # 保存 rollout 输出（每个问题 sample 一个）
+                save_rollout_samples(
+                    model=model,
+                    tokenizer=tokenizer,
+                    device=device,
+                    dtype=dtype,
+                    config=config,
+                    ckpt_dir=ckpt_dir,
+                    global_step=global_step,
+                )
+                
                 # 可选：把 ckpt 上传到 wandb
                 # wandb.save(str(output_file))
 

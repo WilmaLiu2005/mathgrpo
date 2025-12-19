@@ -22,6 +22,7 @@ def rollout(
     reward_function: Callable,
     device: torch.device,
     dtype: torch.dtype,
+    temperature: float = 1.0,
 ) -> List[Episode]:
     end_token = tokenizer.eos_token
     end_token_id = tokenizer.eos_token_id
@@ -60,7 +61,9 @@ def rollout(
         with torch.autocast(device_type=device.type, dtype=dtype):
             logits = model.inference(tokens[:, prev_pos:cur_pos], prev_pos)
         
-        log_probs_all = torch.log_softmax(logits[:, -1], dim=-1)
+        # Apply temperature scaling
+        scaled_logits = logits[:, -1] / temperature
+        log_probs_all = torch.log_softmax(scaled_logits, dim=-1)
         probs = torch.exp(log_probs_all)
         next_token = torch.multinomial(probs, num_samples=1)
         next_token = next_token.reshape(-1)
@@ -201,6 +204,7 @@ def update_policy(
     use_length_grouping: bool = False,
     use_dynamic_clipping: bool = True,
     use_kl_penalty: bool = False,
+    clip_ratio: float = 0.2,  # 添加固定 clip ratio 参数
 ):
     """Update the policy using the GRPO algorithm.
     
@@ -227,6 +231,13 @@ def update_policy(
     num_micro_batches = math.ceil(len(episodes) / micro_batch_size)
     num_target_tokens = sum(len(episode.generated_token_ids) for episode in episodes)
     entropy = 0.0
+    total_clip_stats = {
+        "clipped_lower": 0,
+        "clipped_upper": 0,
+        "total": 0,
+        "ratio_sum": 0.0,
+        "clipped_ratio_sum": 0.0,
+    }
 
     for i in range(0, len(episodes), micro_batch_size):
         print(
@@ -303,6 +314,14 @@ def update_policy(
         # Compute objective based on selected method
         advantages = batch_advantages[:, None]
         
+        clip_stats = {
+            "clipped_lower": 0,
+            "clipped_upper": 0,
+            "total": 0,
+            "ratio_sum": 0.0,
+            "clipped_ratio_sum": 0.0,
+        }
+        
         if use_dynamic_clipping:
             # Importance Sampling with Dynamic Adaptive Clipping
             ratio = torch.exp(log_probs - old_log_probs)
@@ -318,14 +337,53 @@ def update_policy(
             val_high = 1 + 4 * epsilon_high / (q_x + 1e-10)
             upper_bound = 0.5 + 0.5 * torch.sqrt(val_high)
             
+            # Track clipping statistics
+            clipped_lower = (ratio < lower_bound).sum().item()
+            clipped_upper = (ratio > upper_bound).sum().item()
+            total_tokens = ratio.numel()
+            clip_stats = {
+                "clipped_lower": clipped_lower,
+                "clipped_upper": clipped_upper,
+                "total": total_tokens
+            }
+            
             clipped_ratio = torch.clamp(ratio, min=lower_bound, max=upper_bound)
+            clip_stats["ratio_sum"] = ratio.sum().item()
+            clip_stats["clipped_ratio_sum"] = clipped_ratio.sum().item()
             
             surr1 = ratio * advantages
             surr2 = clipped_ratio * advantages
             obj = torch.min(surr1, surr2)
         else:
-            # Standard policy gradient (no clipping)
-            obj = log_probs * advantages
+            # PPO-style fixed clipping
+            ratio = torch.exp(log_probs - old_log_probs)
+            clip_lower = 1.0 - clip_ratio
+            clip_upper = 1.0 + clip_ratio
+        
+            # Track clipping statistics
+            clipped_lower = (ratio < clip_lower).sum().item()
+            clipped_upper = (ratio > clip_upper).sum().item()
+            total_tokens = ratio.numel()
+            clip_stats = {
+                "clipped_lower": clipped_lower,
+                "clipped_upper": clipped_upper,
+                "total": total_tokens,
+                "ratio_sum": ratio.sum().item(),
+            }
+        
+            clipped_ratio = torch.clamp(ratio, min=clip_lower, max=clip_upper)
+            clip_stats["clipped_ratio_sum"] = clipped_ratio.sum().item()
+        
+            surr1 = ratio * advantages
+            surr2 = clipped_ratio * advantages
+            obj = torch.min(surr1, surr2)
+
+        # Accumulate clip statistics (both for dynamic and fixed clipping)
+        total_clip_stats["clipped_lower"] += clip_stats["clipped_lower"]
+        total_clip_stats["clipped_upper"] += clip_stats["clipped_upper"]
+        total_clip_stats["total"] += clip_stats["total"]
+        total_clip_stats["ratio_sum"] += clip_stats["ratio_sum"]
+        total_clip_stats["clipped_ratio_sum"] += clip_stats["clipped_ratio_sum"]
 
         # per-token objective
         obj = (obj * target_masks).sum() / num_target_tokens
@@ -351,5 +409,20 @@ def update_policy(
     
     if use_kl_penalty:
         result["kl_loss"] = kl_loss.item() if isinstance(kl_loss, torch.Tensor) else kl_loss
+    
+    # Return clip statistics (both for dynamic and fixed clipping)
+    total_tokens = total_clip_stats["total"]
+    if total_tokens > 0:
+        result["clip_frac_lower"] = total_clip_stats["clipped_lower"] / total_tokens
+        result["clip_frac_upper"] = total_clip_stats["clipped_upper"] / total_tokens
+        result["clip_frac_total"] = (total_clip_stats["clipped_lower"] + total_clip_stats["clipped_upper"]) / total_tokens
+        result["mean_ratio"] = total_clip_stats["ratio_sum"] / total_tokens
+        result["mean_clipped_ratio"] = total_clip_stats["clipped_ratio_sum"] / total_tokens
+    else:
+        result["clip_frac_lower"] = 0.0
+        result["clip_frac_upper"] = 0.0
+        result["clip_frac_total"] = 0.0
+        result["mean_ratio"] = 0.0
+        result["mean_clipped_ratio"] = 0.0
     
     return result

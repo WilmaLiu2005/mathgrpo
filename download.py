@@ -11,7 +11,7 @@ BASE_DIR = Path("/home/student008/GRPO-Zero") # 更改路径，应该是代码�
 
 # 根目录
 GSM8K_DIR = BASE_DIR / "gsm8k"
-QWEN_DIR = BASE_DIR / "Qwen2.5-3B-Instruct"
+QWEN_DIR = BASE_DIR / "Qwen2.5-3B-base"
 
 # ---------- GSM8K 下载 ---------- #
 def download_gsm8k():
@@ -33,11 +33,11 @@ def download_gsm8k():
 
 # ---------- Qwen 全量下载 ---------- #
 def download_qwen_full():
-    print("\nDownloading full Qwen2.5-3B-Instruct model ...")
+    print("\nDownloading full Qwen2.5-3B model ...")
     QWEN_DIR.mkdir(parents=True, exist_ok=True)
     
     # 获取 repo 中所有文件
-    files = list_repo_files("Qwen/Qwen2.5-3B-Instruct", repo_type="model")
+    files = list_repo_files("Qwen/Qwen2.5-3B", repo_type="model")
     for f in files:
         local_path = QWEN_DIR / f
         if local_path.exists():
@@ -46,7 +46,7 @@ def download_qwen_full():
         print(f"Downloading {f} ...")
         try:
             hf_hub_download(
-                repo_id="Qwen/Qwen2.5-3B-Instruct",
+                repo_id="Qwen/Qwen2.5-3B",
                 filename=f,
                 cache_dir=str(QWEN_DIR),
                 force_download=False,
@@ -61,6 +61,6 @@ def download_qwen_full():
 
 # ---------- 主函数 ---------- #
 if __name__ == "__main__":
-    download_gsm8k()
+    # download_gsm8k()
     download_qwen_full()
     print("\nAll done.")

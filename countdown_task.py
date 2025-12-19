@@ -10,18 +10,17 @@ from tokenizer import Tokenizer
 
 
 SYSTEM_MESSAGE = (
-    "You are a helpful assistant. You first think about the reasoning process "
-    "in your mind and then provide the user with the answer."
+    "You are a helpful assistant that solves math problems accurately."
 )
 
 USER_TEMPLATE = (
-    "Solve the following math word problem. "
-    "Show your reasoning inside <think></think> tags "
+    "Solve the following math word problem.\n"
+    "Provide your reasoning inside <think></think> tags, "
     "and put the final numeric answer inside <answer></answer> tags.\n\n"
     "Problem: {question}"
 )
 
-RESPONSE_PROMPT = "Let me solve this step by step.\n<think>"
+RESPONSE_PROMPT = "<think>"
 
 class GSM8KDataset(Dataset):
     """Unified dataset for GSM8K main and socratic splits."""
@@ -98,35 +97,44 @@ class GSM8KDataset(Dataset):
             prefix_token_ids=[x["prefix_token_ids"] for x in batch],
         )
 
-def format_reward_function(response: str, end_token: Optional[str] = None) -> float:
+def format_penalty_function(response: str, end_token: Optional[str] = None) -> float:
     """
-    Checks if the response follows the format <think>...</think><answer>...</answer>
+    Checks if the response follows the format:
+    <think>...</think>
+    <answer>...</answer>
+
+    Returns:
+        0.0 for correct format
+        negative penalty for incorrect / missing parts
     """
     # Strip end token if present
     if end_token and response.endswith(end_token):
         response = response[: -len(end_token)]
 
-    think_regex = r"<think>.*?<\/think>"
-    answer_regex = r"<answer>.*?<\/answer>"
-    full_format_regex = r"^<think>.*?<\/think>\n<answer>.*?<\/answer>$"
+    # Regex definitions (CORRECT TAGS)
+    think_regex = r"<think>.*?</think>"
+    answer_regex = r"<answer>.*?</answer>"
+    full_format_regex = r"^<think>.*?</think>\s*<answer>.*?</answer>$"
 
     think_match = re.search(think_regex, response, re.DOTALL)
     answer_match = re.search(answer_regex, response, re.DOTALL)
     full_format_match = re.match(full_format_regex, response, re.DOTALL)
 
+    # Perfect format → no penalty
     if full_format_match:
-        return 1.0
+        return 0.0
 
-    reward = 0.0
+    penalty = 0.0
 
-    if think_match:
-        reward += 0.1
+    # Missing <think>...</think>
+    if not think_match:
+        penalty -= 0.1
 
-    if answer_match:
-        reward += 0.5
+    # Missing <answer>...</answer>
+    if not answer_match:
+        penalty -= 0.5
 
-    return reward
-
+    return penalty
 
 def answer_reward_function_gsm8k(response: str, gold_answer: str) -> float:
     """
@@ -170,20 +178,22 @@ def answer_reward_function_gsm8k(response: str, gold_answer: str) -> float:
 
 def reward_function(response: str, question=None, answer=None, end_token=None):
     """
-    reward = 0.1 * format_reward + answer_reward
+    reward = answer_reward - format_penalty
     where answer_reward is correctness of the GSM8K final answer
+    and format_penalty is a penalty for incorrect format (0.0 for correct format)
     """
 
-    # keep your format reward unchanged
-    format_reward = format_reward_function("<think>" + response, end_token)
+    # Calculate format penalty (0.0 for correct format, negative for incorrect)
+    # 因为response_prompt不会被拼进前缀里
+    format_penalty = format_penalty_function("<think>" + response, end_token)
 
     # GSM8K correctness reward
     answer_reward = answer_reward_function_gsm8k(response, gold_answer=answer)
 
     return {
-        "reward": 0.1 * format_reward + answer_reward,
+        "reward": answer_reward + format_penalty,  # format_penalty is already negative, so we add it
         "reward_info": {
-            "format_reward": format_reward,
+            "format_penalty": format_penalty,
             "answer_reward": answer_reward,
         },
     }
