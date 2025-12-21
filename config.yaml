@@ -1,10 +1,10 @@
 model:
-  pretrained_model_path: "Qwen2.5-3B-Instruct"
+  pretrained_model_path: "/home/student008/GRPO-Zero/Qwen2.5-3B-Instruct/models--Qwen--Qwen2.5-3B-Instruct/snapshots/aa8e72537993ba99e69dfaafa59ed015b17504d1"
   device: "cuda"
   dtype: "bfloat16"
 
 data:
-  path: "gsm8k"          # ← 你的 GSM8K 数据存放目录
+  path: "/home/student008/GRPO-Zero/gsm8k"          # ← 你的 GSM8K 数据存放目录
   config_name: "main"    # ← 可选: "main" 或 "socratic"
   test_size: 128
 
@@ -12,14 +12,14 @@ training:
   random_seed: 1337
 
   # GSM8K 题目较长，把 prompt 长度稍微调大
-  max_prompt_len: 512
-  max_gen_len: 1024
+  max_prompt_len: 256
+  max_gen_len: 512
   
   # 采样参数
   temperature: 1.2            # 采样温度，控制随机性（1.0=标准采样，>1.0=更随机，<1.0=更确定）
 
-  batch_size: 256
-  num_questions_per_batch: 32
+  batch_size: 32
+  num_questions_per_batch: 4
 
   micro_batch_size: 2
   max_grad_norm: 1.0
@@ -31,7 +31,7 @@ training:
   log_dir: "logs"
 
   skip_unfinished_episodes: false
-  ckpt_save_interval: 100
+  ckpt_save_interval: 300
   eval_interval: 10
 
   memory_efficient_adamw: false
@@ -41,9 +41,9 @@ training:
 
   # GRPO 算法相关配置
   # Dynamic Clipping 参数
-  use_dynamic_clipping: false   # 是否使用 dynamic clipping（true=动态裁剪，false=固定裁剪PPO风格）
-  epsilon_low: 0.3              # Dynamic clipping 下界参数
-  epsilon_high: 0.3             # Dynamic clipping 上界参数
+  use_dynamic_clipping: true   # 是否使用 dynamic clipping（true=动态裁剪，false=固定裁剪PPO风格）
+  epsilon_low: 0.2              # Dynamic clipping 下界参数
+  epsilon_high: 1.2             # Dynamic clipping 上界参数
   
   # 固定值 Clipping 参数（当 use_dynamic_clipping=false 时使用）
   clip_ratio: 0.2               # PPO-style 固定 clip ratio（0.0=不使用裁剪，0.2 表示 [0.8, 1.2]）
@@ -53,13 +53,15 @@ training:
   kl_coeff: 0.05                # KL 散度正则项系数（仅在 use_kl_penalty=true 时生效）
   
   # Reward 归一化参数
-  use_length_grouping: true     # 是否使用长度分组进行 reward 归一化
+  use_length_grouping: false     # 是否使用长度分组进行 reward 归一化
+  use_difficulty_grouping: true # 是否使用难度分组进行 reward 归一化
+  num_eval_questions_per_batch: 512
   
 wandb:
   enable: true
   project: mathgrpo
-  entity: amdyes   # 可选
-  run_name: "length_grouping_1212"                    # 为空则用时间戳
+  entity: 17701248665-tsinghua-university   # 可选
+  run_name: "delete me"                    # 为空则用时间戳
   mode: online                    # 或 offline/disabled
   watch_model: false              # 是否记录梯度/参数直方图
   watch_log_freq: 100
