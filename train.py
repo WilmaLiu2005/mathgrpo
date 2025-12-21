@@ -8,7 +8,7 @@ import torch
 import yaml
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard.writer import SummaryWriter
-from countdown_task import GSM8KDataset, reward_function
+from countdown_task import GSM8KDataset, reward_function, answer_reward_function_gsm8k
 from grpo import rollout, update_policy
 from optimizer import MemoryEfficientAdamW
 from qwen2_model import Transformer
@@ -16,6 +16,7 @@ from tokenizer import Tokenizer
 import wandb
 import random
 from copy import deepcopy
+from tqdm import tqdm
 
 def sample_trace_by_length_group(episodes):
     groups = {"short": [], "medium": [], "long": []}
@@ -145,10 +146,96 @@ def main(config_path: str):
 
     model = Transformer.from_pretrained(pretrained_model_path, device=device).train()
 
-    ref_model = deepcopy(model)
-    ref_model.eval()
-    for p in ref_model.parameters():
-        p.requires_grad = False    
+    if config["training"].get("use_kl_penalty", False):
+        ref_model = deepcopy(model) 
+        ref_model.eval()
+        for p in ref_model.parameters():
+            p.requires_grad = False
+    else:
+        ref_model = None
+
+    # ---------------------------
+    # Difficulty Grouping (Curriculum Learning)
+    # ---------------------------
+    if config["training"].get("use_difficulty_grouping", False):
+        print("Evaluating dataset difficulty for curriculum learning...")
+        model.eval()
+        
+        eval_batch_size = config["training"].get("num_eval_questions_per_batch", NUM_QUESTIONS_PER_BATCH)
+        # Create a temporary dataloader for evaluation
+        eval_dataloader = DataLoader(
+            train_dataset,
+            shuffle=False,
+            collate_fn=GSM8KDataset.collate_fn,
+            batch_size=eval_batch_size,
+        )
+        
+        accuracies = []
+        with torch.no_grad():
+            for batch in tqdm(eval_dataloader, desc="Difficulty Eval"):
+                # Adjust prompt for direct answer to save time
+                direct_prefix = []
+                direct_prefix_token_ids = []
+                for q in batch.questions:
+                    user_message = (
+                        "Solve the following math word problem.\n"
+                        "Provide the final numeric answer inside <answer></answer> tags directly without any reasoning.\n\n"
+                        "Problem: {question}"
+                    ).format(question=q)
+                    prefix = tokenizer.encode_chat_with_response_prompt(
+                        [
+                            {"role": "system", "content": "You are a helpful assistant that solves math problems accurately."},
+                            {"role": "user", "content": user_message},
+                        ],
+                        "<answer>",
+                    )
+                    direct_prefix.append(prefix)
+                    direct_prefix_token_ids.append(tokenizer.tokenize(prefix).ids)
+                
+                eval_batch = deepcopy(batch)
+                eval_batch.prefix = direct_prefix
+                eval_batch.prefix_token_ids = direct_prefix_token_ids
+
+                episodes = rollout(
+                    model=model,
+                    tokenizer=tokenizer,
+                    batch=eval_batch,
+                    max_gen_len=16, # Short generation for direct answer
+                    num_answer_per_question=1,
+                    reward_function=lambda response, **kwargs: {
+                        "reward": answer_reward_function_gsm8k("<answer>" + response, kwargs.get("answer")),
+                        "reward_info": {"answer_reward": answer_reward_function_gsm8k("<answer>" + response, kwargs.get("answer"))}
+                    },
+                    device=device,
+                    dtype=dtype,
+                    temperature=config["training"].get("temperature", 1.0),
+                )
+                
+                # Calculate accuracy per question
+                for ep in episodes:
+                    accuracies.append(ep.reward_info.get("answer_reward", 0.0))
+        
+        # Add accuracy to dataset and sort
+        # Ensure we are working with a copy to avoid SettingWithCopyWarning
+        train_dataset.data = train_dataset.data.copy()
+        train_dataset.data['accuracy'] = accuracies
+        # Sort by accuracy descending (simple first)
+        train_dataset.data = train_dataset.data.sort_values(by='accuracy', ascending=False)
+        
+        print("Dataset sorted by difficulty (simple first).")
+        print(f"Top 5 accuracies: {train_dataset.data['accuracy'].head().tolist()}")
+        print(f"Bottom 5 accuracies: {train_dataset.data['accuracy'].tail().tolist()}")
+        
+        # Re-create train_dataloader with shuffle=False
+        train_dataloader = DataLoader(
+            train_dataset,
+            shuffle=False,
+            collate_fn=GSM8KDataset.collate_fn,
+            generator=generator,
+            batch_size=NUM_QUESTIONS_PER_BATCH,
+        )
+        
+        model.train()
 
     optimizer = MemoryEfficientAdamW(
         model.parameters(),
@@ -200,7 +287,7 @@ def main(config_path: str):
                 max_grad_norm=config["training"]["max_grad_norm"],
                 device=device,
                 dtype=dtype,
-                ref_model=ref_model if config["training"].get("use_kl_penalty", False) else None,
+                ref_model=ref_model,
                 epsilon_low=config["training"].get("epsilon_low", 0.2),
                 epsilon_high=config["training"].get("epsilon_high", 0.2),
                 kl_coeff=config["training"].get("kl_coeff", 0.0),
