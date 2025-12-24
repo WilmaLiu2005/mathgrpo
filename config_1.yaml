@@ -1,6 +1,6 @@
 model:
   pretrained_model_path: "/home/student008/GRPO-zero/Qwen2.5-3B-base/models--Qwen--Qwen2.5-3B/snapshots/3aab1f1954e9cc14eb9509a215f9e5ca08227a9b"
-  device: "cuda"
+  device: "cuda:1"
   dtype: "bfloat16"
 
 data:
@@ -27,8 +27,8 @@ training:
   weight_decay: 0.0
   betas: [0.9, 0.999]
 
-  ckpt_dir: "ckpt"
-  log_dir: "logs"
+  ckpt_dir: "use_length_grouping/ckpt"
+  log_dir: "use_length_grouping/logs"
 
   skip_unfinished_episodes: false
   ckpt_save_interval: 100
@@ -53,13 +53,13 @@ training:
   kl_coeff: 0.05                # KL 散度正则项系数（仅在 use_kl_penalty=true 时生效）
   
   # Reward 归一化参数
-  use_length_grouping: false     # 是否使用长度分组进行 reward 归一化
+  use_length_grouping: true     # 是否使用长度分组进行 reward 归一化
   
 wandb:
   enable: true
   project: mathgrpo
   entity: amdyes   # 可选
-  run_name: "final_baseline1221"                    # 为空则用时间戳
+  run_name: "dynamic_length_grouping_1221"                    # 为空则用时间戳
   mode: online                    # 或 offline/disabled
   watch_model: false              # 是否记录梯度/参数直方图
   watch_log_freq: 100
