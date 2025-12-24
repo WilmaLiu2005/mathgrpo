@@ -154,89 +154,6 @@ def main(config_path: str):
     else:
         ref_model = None
 
-    # ---------------------------
-    # Difficulty Grouping (Curriculum Learning)
-    # ---------------------------
-    if config["training"].get("use_difficulty_grouping", False):
-        print("Evaluating dataset difficulty for curriculum learning...")
-        model.eval()
-        
-        eval_batch_size = config["training"].get("num_eval_questions_per_batch", NUM_QUESTIONS_PER_BATCH)
-        # Create a temporary dataloader for evaluation
-        eval_dataloader = DataLoader(
-            train_dataset,
-            shuffle=False,
-            collate_fn=GSM8KDataset.collate_fn,
-            batch_size=eval_batch_size,
-        )
-        
-        accuracies = []
-        with torch.no_grad():
-            for batch in tqdm(eval_dataloader, desc="Difficulty Eval"):
-                # Adjust prompt for direct answer to save time
-                direct_prefix = []
-                direct_prefix_token_ids = []
-                for q in batch.questions:
-                    user_message = (
-                        "Solve the following math word problem.\n"
-                        "Provide the final numeric answer inside <answer></answer> tags directly without any reasoning.\n\n"
-                        "Problem: {question}"
-                    ).format(question=q)
-                    prefix = tokenizer.encode_chat_with_response_prompt(
-                        [
-                            {"role": "system", "content": "You are a helpful assistant that solves math problems accurately."},
-                            {"role": "user", "content": user_message},
-                        ],
-                        "<answer>",
-                    )
-                    direct_prefix.append(prefix)
-                    direct_prefix_token_ids.append(tokenizer.tokenize(prefix).ids)
-                
-                eval_batch = deepcopy(batch)
-                eval_batch.prefix = direct_prefix
-                eval_batch.prefix_token_ids = direct_prefix_token_ids
-
-                episodes = rollout(
-                    model=model,
-                    tokenizer=tokenizer,
-                    batch=eval_batch,
-                    max_gen_len=16, # Short generation for direct answer
-                    num_answer_per_question=1,
-                    reward_function=lambda response, **kwargs: {
-                        "reward": answer_reward_function_gsm8k("<answer>" + response, kwargs.get("answer")),
-                        "reward_info": {"answer_reward": answer_reward_function_gsm8k("<answer>" + response, kwargs.get("answer"))}
-                    },
-                    device=device,
-                    dtype=dtype,
-                    temperature=config["training"].get("temperature", 1.0),
-                )
-                
-                # Calculate accuracy per question
-                for ep in episodes:
-                    accuracies.append(ep.reward_info.get("answer_reward", 0.0))
-        
-        # Add accuracy to dataset and sort
-        # Ensure we are working with a copy to avoid SettingWithCopyWarning
-        train_dataset.data = train_dataset.data.copy()
-        train_dataset.data['accuracy'] = accuracies
-        # Sort by accuracy descending (simple first)
-        train_dataset.data = train_dataset.data.sort_values(by='accuracy', ascending=False)
-        
-        print("Dataset sorted by difficulty (simple first).")
-        print(f"Top 5 accuracies: {train_dataset.data['accuracy'].head().tolist()}")
-        print(f"Bottom 5 accuracies: {train_dataset.data['accuracy'].tail().tolist()}")
-        
-        # Re-create train_dataloader with shuffle=False
-        train_dataloader = DataLoader(
-            train_dataset,
-            shuffle=False,
-            collate_fn=GSM8KDataset.collate_fn,
-            generator=generator,
-            batch_size=NUM_QUESTIONS_PER_BATCH,
-        )
-        
-        model.train()
-
     optimizer = MemoryEfficientAdamW(
         model.parameters(),
         lr=config["training"]["learning_rate"],
@@ -259,6 +176,10 @@ def main(config_path: str):
     global_step = 0
     start_time = time.time()
 
+    # For dynamic difficulty grouping
+    question_accuracies = {}
+    use_difficulty_grouping = config["training"].get("use_difficulty_grouping", False)
+
     for epoch in range(1, num_epochs + 1):
         for step_in_epoch, batch in enumerate(train_dataloader, start=1):
             global_step += 1
@@ -277,6 +198,16 @@ def main(config_path: str):
 
             if config["training"]["skip_unfinished_episodes"]:
                 episodes = [ep for ep in episodes if ep.is_finished]
+
+            # Collect accuracies for dynamic difficulty grouping during epoch 1
+            if epoch == 1 and use_difficulty_grouping:
+                for i, idx in enumerate(batch.indices):
+                    start_idx = i * NUM_ANSWERS_PER_QUESTION
+                    end_idx = start_idx + NUM_ANSWERS_PER_QUESTION
+                    question_episodes = episodes[start_idx:end_idx]
+                    if question_episodes:
+                        avg_acc = np.mean([ep.reward_info.get("answer_reward", 0.0) for ep in question_episodes])
+                        question_accuracies[idx] = float(avg_acc)
 
             results = update_policy(
                 model=model,
@@ -401,6 +332,29 @@ def main(config_path: str):
             # 如设置了 max_steps，则达到后提前结束
             if max_steps is not None and global_step >= max_steps:
                 break
+
+        # End of epoch logic
+        if epoch == 1 and use_difficulty_grouping:
+            print(f"\nEpoch 1 finished. Sorting dataset by difficulty for subsequent epochs...")
+            # Update dataset with collected accuracies
+            accuracies = [question_accuracies.get(i, 0.0) for i in range(len(train_dataset))]
+            train_dataset.data = train_dataset.data.copy()
+            train_dataset.data['accuracy'] = accuracies
+            # Sort by accuracy descending (simple first)
+            train_dataset.data = train_dataset.data.sort_values(by='accuracy', ascending=False)
+            
+            print(f"Top 5 accuracies: {train_dataset.data['accuracy'].head().tolist()}")
+            print(f"Bottom 5 accuracies: {train_dataset.data['accuracy'].tail().tolist()}")
+            
+            # Re-create train_dataloader with shuffle=False for curriculum
+            train_dataloader = DataLoader(
+                train_dataset,
+                shuffle=False,
+                collate_fn=GSM8KDataset.collate_fn,
+                generator=generator,
+                batch_size=NUM_QUESTIONS_PER_BATCH,
+            )
+            print("Dataset sorted and dataloader updated.")
 
         if max_steps is not None and global_step >= max_steps:
             break
