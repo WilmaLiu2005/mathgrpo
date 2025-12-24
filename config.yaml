@@ -55,7 +55,6 @@ training:
   # Reward 归一化参数
   use_length_grouping: false     # 是否使用长度分组进行 reward 归一化
   use_difficulty_grouping: true # 是否使用难度分组进行 reward 归一化
-  num_eval_questions_per_batch: 512
   
 wandb:
   enable: true

@@ -69,6 +69,7 @@ class GSM8KDataset(Dataset):
         q = item["question"]
         a = item["answer"]
         item.update(self.encode_prefix(q))
+        item["index"] = idx
         return item
 
     def encode_prefix(self, question: str):
@@ -92,6 +93,7 @@ class GSM8KDataset(Dataset):
         return MiniBatch(
             questions=[x["question"] for x in batch],
             answers=[x["answer"] for x in batch],
+            indices=[x["index"] for x in batch],
             prefix=[x["prefix"] for x in batch],
             prefix_tokens=[x["prefix_tokens"] for x in batch],
             prefix_token_ids=[x["prefix_token_ids"] for x in batch],

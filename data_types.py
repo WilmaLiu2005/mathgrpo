@@ -25,6 +25,7 @@ class MiniBatch:
     # 针对 GSM8K 的字段（用于取标准答案做奖励）
     questions: List[str] = field(default_factory=list)
     answers: List[str] = field(default_factory=list)
+    indices: List[int] = field(default_factory=list)
 
     # 兼容旧 countdown 任务的字段（如果不用可以为空）
     numbers: List[List[int]] = field(default_factory=list)
