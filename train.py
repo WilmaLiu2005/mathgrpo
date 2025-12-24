@@ -16,6 +16,7 @@ from tokenizer import Tokenizer
 import wandb
 import random
 from copy import deepcopy
+import os
 
 def sample_trace_by_length_group(episodes):
     groups = {"short": [], "medium": [], "long": []}
@@ -57,6 +58,7 @@ def evaluate(model, tokenizer, device, dtype, config, global_step):
         split="test",
         config_name=config["data"].get("config_name", "main"),
         test_size=config["data"]["test_size"],
+        prefix_file=config["training"].get("prefix_file", None),  # Prefix 文件路径（如果启用）
     )
     generator = torch.Generator(device=device)
     dataloader = DataLoader(
@@ -71,20 +73,22 @@ def evaluate(model, tokenizer, device, dtype, config, global_step):
     lengths = []
     all_episodes = []
     for batch in dataloader:
-        episodes = rollout(
-            model=model,
-            tokenizer=tokenizer,
-            batch=batch,
-            max_gen_len=config["training"]["max_gen_len"] * 2,
-            num_answer_per_question=1,
-            reward_function=reward_function,
-            device=device,
-            dtype=dtype,
-            temperature=config["training"].get("temperature", 1.0),
-        )
-        all_episodes.extend(episodes)
-        success.extend([episode.reward_info["answer_reward"] for episode in episodes])
-        lengths.extend([len(episode.generated_token_ids) for episode in episodes])
+            episodes = rollout(
+                model=model,
+                tokenizer=tokenizer,
+                batch=batch,
+                max_gen_len=config["training"]["max_gen_len"] * 2,
+                num_answer_per_question=1,
+                reward_function=reward_function,
+                device=device,
+                dtype=dtype,
+                temperature=config["training"].get("temperature", 1.0),
+                enable_prefix=config["training"].get("enable_prefix", False),
+                prefix_dropout_prob=config["training"].get("prefix_dropout_prob", 0.5),
+            )
+            all_episodes.extend(episodes)
+            success.extend([episode.reward_info["answer_reward"] for episode in episodes])
+            lengths.extend([len(episode.generated_token_ids) for episode in episodes])
         
     # 采样trace
     sampled_traces = sample_trace_by_length_group(all_episodes)
@@ -133,6 +137,7 @@ def main(config_path: str):
         split="train",
         config_name=config["data"].get("config_name", "main"),
         test_size=config["data"]["test_size"],
+        prefix_file=config["training"].get("prefix_file", None),  # Prefix 文件路径（如果启用）
     )
     generator = torch.Generator(device=device)
     train_dataloader = DataLoader(
@@ -186,6 +191,8 @@ def main(config_path: str):
                 device=device,
                 dtype=dtype,
                 temperature=config["training"].get("temperature", 1.0),
+                enable_prefix=config["training"].get("enable_prefix", False),
+                prefix_dropout_prob=config["training"].get("prefix_dropout_prob", 0.5),
             )
 
             if config["training"]["skip_unfinished_episodes"]:
@@ -208,6 +215,8 @@ def main(config_path: str):
                 use_dynamic_clipping=config["training"].get("use_dynamic_clipping", True),
                 use_kl_penalty=config["training"].get("use_kl_penalty", False),
                 clip_ratio=config["training"].get("clip_ratio", 0.2),
+                enable_prefix=config["training"].get("enable_prefix", False),
+                prefix_sft_coeff=config["training"].get("prefix_sft_coeff", 0.2),
             )
 
             torch.cuda.synchronize()
@@ -230,7 +239,9 @@ def main(config_path: str):
             lr = optimizer.param_groups[0]["lr"]
             loss = results["loss"]
             kl_loss = results.get("kl_loss", 0.0)
+            prefix_sft_loss = results.get("prefix_sft_loss", 0.0)
             mean_response_len = float(np.mean([len(ep.generated_token_ids) for ep in episodes])) if episodes else 0.0
+            mean_prefix_len = float(np.mean([ep.prefix_length for ep in episodes])) if episodes and config["training"].get("enable_prefix", False) else 0.0
             
             # Clip statistics
             clip_frac_lower = results.get("clip_frac_lower", 0.0)
@@ -260,6 +271,10 @@ def main(config_path: str):
             tb_writer.add_scalar("loss", loss, global_step)
             if kl_loss > 0:
                 tb_writer.add_scalar("kl_loss", kl_loss, global_step)
+            if prefix_sft_loss > 0:
+                tb_writer.add_scalar("prefix_sft_loss", prefix_sft_loss, global_step)
+            if mean_prefix_len > 0:
+                tb_writer.add_scalar("mean_prefix_len", mean_prefix_len, global_step)
             tb_writer.add_scalar("mean_reward", mean_reward, global_step)
             tb_writer.add_scalar("std_reward", std_reward, global_step)
             tb_writer.add_scalar("success_rate/train", success_rate, global_step)
@@ -296,6 +311,10 @@ def main(config_path: str):
             }
             if kl_loss > 0:
                 log_dict["kl_loss"] = kl_loss
+            if prefix_sft_loss > 0:
+                log_dict["prefix_sft_loss"] = prefix_sft_loss
+            if mean_prefix_len > 0:
+                log_dict["mean_prefix_len"] = mean_prefix_len
             wandb.log(log_dict, step=global_step)
 
             # 文本样例（用 global_step）

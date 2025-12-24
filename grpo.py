@@ -1,8 +1,9 @@
 import dataclasses
 import gc
 import math
+import random
 from collections import defaultdict
-from typing import Callable, List
+from typing import Callable, List, Optional
 
 import numpy as np
 import torch
@@ -23,11 +24,107 @@ def rollout(
     device: torch.device,
     dtype: torch.dtype,
     temperature: float = 1.0,
+    enable_prefix: bool = False,
+    prefix_dropout_prob: float = 0.5,
 ) -> List[Episode]:
     end_token = tokenizer.eos_token
     end_token_id = tokenizer.eos_token_id
     pad_token_id = tokenizer.pad_token_id
-    prefix_token_ids = batch.prefix_token_ids # prompt tokenize之后的列表
+    
+    # Step 1: Prefix 采样（如果启用）
+    prefix_info_list = []  # 存储每个问题的 prefix 信息
+    if enable_prefix:
+        for i, question in enumerate(batch.questions):
+            prefix_data = batch.prefix_data[i] if hasattr(batch, 'prefix_data') and i < len(batch.prefix_data) else None
+            
+            if prefix_data and (prefix_data.get("deepseek_prefixes") or prefix_data.get("3b_prefixes")):
+                # 从预生成的 prefix 中随机选择
+                use_deepseek = random.random() < prefix_dropout_prob
+                
+                if use_deepseek and prefix_data.get("deepseek_prefixes"):
+                    # 从 DeepSeek prefixes 中随机选择一个
+                    deepseek_prefixes = prefix_data["deepseek_prefixes"]
+                    if deepseek_prefixes:
+                        selected = random.choice(deepseek_prefixes)
+                        prefix_text = selected["text"]
+                        prefix_token_ids = selected["token_ids"]
+                        prefix_tokens = selected["tokens"]
+                        prefix_source = "deepseek"
+                        prefix_old_log_probs = []  # DeepSeek 的 prefix 不需要 log probs
+                    else:
+                        # 如果没有 DeepSeek prefix，使用 3B
+                        if prefix_data.get("3b_prefixes"):
+                            selected = random.choice(prefix_data["3b_prefixes"])
+                            prefix_text = selected["text"]
+                            prefix_token_ids = selected["token_ids"]
+                            prefix_tokens = selected["tokens"]
+                            prefix_old_log_probs = selected.get("log_probs", [])
+                            prefix_source = "3b"
+                        else:
+                            # 如果都没有，使用空 prefix
+                            prefix_text = ""
+                            prefix_token_ids = []
+                            prefix_tokens = []
+                            prefix_source = "none"
+                            prefix_old_log_probs = []
+                else:
+                    # 使用 3B prefix
+                    if prefix_data.get("3b_prefixes"):
+                        selected = random.choice(prefix_data["3b_prefixes"])
+                        prefix_text = selected["text"]
+                        prefix_token_ids = selected["token_ids"]
+                        prefix_tokens = selected["tokens"]
+                        prefix_old_log_probs = selected.get("log_probs", [])
+                        prefix_source = "3b"
+                    elif prefix_data.get("deepseek_prefixes"):
+                        # 如果没有 3B prefix，使用 DeepSeek
+                        selected = random.choice(prefix_data["deepseek_prefixes"])
+                        prefix_text = selected["text"]
+                        prefix_token_ids = selected["token_ids"]
+                        prefix_tokens = selected["tokens"]
+                        prefix_source = "deepseek"
+                        prefix_old_log_probs = []
+                    else:
+                        # 如果都没有，使用空 prefix
+                        prefix_text = ""
+                        prefix_token_ids = []
+                        prefix_tokens = []
+                        prefix_source = "none"
+                        prefix_old_log_probs = []
+            else:
+                # 如果没有预生成的 prefix 数据，使用空 prefix
+                prefix_text = ""
+                prefix_token_ids = []
+                prefix_tokens = []
+                prefix_source = "none"
+                prefix_old_log_probs = []
+            
+            prefix_info_list.append({
+                "prefix_text": prefix_text,
+                "prefix_token_ids": prefix_token_ids,
+                "prefix_tokens": prefix_tokens,
+                "prefix_source": prefix_source,
+                "prefix_old_log_probs": prefix_old_log_probs,
+            })
+    else:
+        # 未启用 prefix 模式，使用空 prefix
+        for i in range(len(batch.questions)):
+            prefix_info_list.append({
+                "prefix_text": "",
+                "prefix_token_ids": [],
+                "prefix_tokens": [],
+                "prefix_source": "none",
+                "prefix_old_log_probs": [],
+            })
+    
+    # 构建完整的 prefix（原始 prompt + 生成的 prefix）
+    full_prefix_token_ids = []
+    for i, original_prefix_ids in enumerate(batch.prefix_token_ids):
+        # 将生成的 prefix token ids 添加到原始 prompt 后面
+        full_prefix = original_prefix_ids + prefix_info_list[i]["prefix_token_ids"]
+        full_prefix_token_ids.append(full_prefix)
+    
+    prefix_token_ids = full_prefix_token_ids
     bsz = len(batch.prefix) * num_answer_per_question
     min_prompt_len = min(len(t) for t in prefix_token_ids)
     max_prompt_len = max(len(t) for t in prefix_token_ids)
@@ -99,32 +196,61 @@ def rollout(
     # prepare the output episodes
     episodes = []
     for i in range(bsz // num_answer_per_question):
+        # 获取原始 prompt 长度和 prefix 长度
+        original_prompt_len = len(batch.prefix_token_ids[i])
+        prefix_len = len(prefix_info_list[i]["prefix_token_ids"])
+        prefix_start_pos = original_prompt_len
+        continuation_start_pos = original_prompt_len + prefix_len
+        
         for j in range(num_answer_per_question):
             idx = i * num_answer_per_question + j
-            generated_token_ids = tokens_list[idx][len(batch.prefix_token_ids[i]) :]
-            generated_log_probs = token_log_probs_list[idx][len(batch.prefix_token_ids[i]) :]
+            
+            # Continuation token ids（从 continuation_start_pos 开始）
+            continuation_token_ids = tokens_list[idx][continuation_start_pos:]
+            continuation_log_probs = token_log_probs_list[idx][continuation_start_pos:]
+            
             # remove padding tokens
-            if pad_token_id in generated_token_ids:
-                pad_idx = generated_token_ids.index(pad_token_id)
-                generated_token_ids = generated_token_ids[:pad_idx]
-                generated_log_probs = generated_log_probs[:pad_idx]
-            generated_text = tokenizer.detokenize(generated_token_ids)
+            if pad_token_id in continuation_token_ids:
+                pad_idx = continuation_token_ids.index(pad_token_id)
+                continuation_token_ids = continuation_token_ids[:pad_idx]
+                continuation_log_probs = continuation_log_probs[:pad_idx]
+            
+            # 完整输出（prefix + continuation）用于 reward 计算
+            # 注意：原始 prompt 已经包含 <think>，所以：
+            # - prefix 在 <think> 后面
+            # - continuation 包含后续推理 + </think> + <answer>答案</answer>
+            # 最终格式：<think>prefix + continuation
+            full_output_token_ids = prefix_info_list[i]["prefix_token_ids"] + continuation_token_ids
+            full_output_text = tokenizer.detokenize(full_output_token_ids)
+            
+            # 计算 reward（基于完整输出）
+            # reward_function 会在 response 前面加上 <think>，所以最终是：
+            # <think> + (prefix + continuation)
             rewards = reward_function(
-                response=generated_text,
-                question=batch.questions[i],   # 可选
-                answer=batch.answers[i],       # 必需：用 gold answer 比对
+                response=full_output_text,
+                question=batch.questions[i],
+                answer=batch.answers[i],
                 end_token=end_token,
             )
+            
+            # 构建完整的 prefix（原始 prompt + 生成的 prefix）
+            full_prefix_text = batch.prefix[i] + prefix_info_list[i]["prefix_text"]
+            full_prefix_token_ids_combined = batch.prefix_token_ids[i] + prefix_info_list[i]["prefix_token_ids"]
+            full_prefix_tokens_combined = batch.prefix_tokens[i] + prefix_info_list[i]["prefix_tokens"]
+            
             episode = Episode(
-                prefix=batch.prefix[i],
-                text=batch.prefix[i] + generated_text,
-                prefix_token_ids=batch.prefix_token_ids[i],
-                prefix_tokens=batch.prefix_tokens[i],
-                generated_token_ids=generated_token_ids,
-                old_log_probs=generated_log_probs,
+                prefix=full_prefix_text,
+                text=full_prefix_text + tokenizer.detokenize(continuation_token_ids),
+                prefix_token_ids=full_prefix_token_ids_combined,
+                prefix_tokens=full_prefix_tokens_combined,
+                generated_token_ids=continuation_token_ids,  # 只包含 continuation
+                old_log_probs=continuation_log_probs,  # 只包含 continuation 的 log probs
                 is_finished=is_finished_list[idx],
                 reward=rewards["reward"],
                 reward_info=rewards["reward_info"],
+                prefix_source=prefix_info_list[i]["prefix_source"],
+                prefix_length=prefix_len,
+                prefix_old_log_probs=prefix_info_list[i]["prefix_old_log_probs"],
             )
             episodes.append(episode)
     # clear the output line
@@ -209,6 +335,8 @@ def update_policy(
     use_dynamic_clipping: bool = True,
     use_kl_penalty: bool = False,
     clip_ratio: float = 0.2,
+    enable_prefix: bool = False,
+    prefix_sft_coeff: float = 0.2,
 ):
     """Update the policy using the GRPO algorithm.
     
@@ -235,7 +363,9 @@ def update_policy(
     episodes.sort(key=lambda x: len(x.prefix_token_ids) + len(x.generated_token_ids))
     num_micro_batches = math.ceil(len(episodes) / micro_batch_size)
     num_target_tokens = sum(len(episode.generated_token_ids) for episode in episodes)
+    num_prefix_tokens = sum(episode.prefix_length for episode in episodes) if enable_prefix else 0
     entropy = 0.0
+    prefix_sft_loss_total = 0.0
     total_clip_stats = {
         "clipped_lower": 0,
         "clipped_upper": 0,
@@ -263,22 +393,52 @@ def update_policy(
             + [pad_token_id] * (batch_max_length - batch_lengths[i])
             for i, episode in enumerate(batch_episodes)
         ]
-        batch_old_log_probs = [
-            [0.0] * len(episode.prefix_token_ids)
-            + episode.old_log_probs
-            + [0.0] * (batch_max_length - batch_lengths[i])
-            for i, episode in enumerate(batch_episodes)
-        ]
-        batch_masks = [
-            [0] * len(episode.prefix_token_ids)
-            + [1] * len(episode.generated_token_ids)
-            + [0] * (batch_max_length - batch_lengths[i])
-            for i, episode in enumerate(batch_episodes)
-        ]
+        # 构建 batch_old_log_probs：prefix 的 old_log_probs + continuation 的 old_log_probs
+        batch_old_log_probs = []
+        batch_prefix_masks = []  # Prefix mask（用于 SFT loss）
+        batch_continuation_masks = []  # Continuation mask（用于 GRPO loss）
+        for i, episode in enumerate(batch_episodes):
+            prefix_len = episode.prefix_length if enable_prefix else 0
+            original_prompt_len = len(episode.prefix_token_ids) - prefix_len
+            
+            # Prefix old_log_probs（如果有）
+            if enable_prefix and episode.prefix_old_log_probs:
+                prefix_old_log_probs = episode.prefix_old_log_probs
+            else:
+                prefix_old_log_probs = [0.0] * prefix_len
+            
+            # 完整的 old_log_probs：原始 prompt (0) + prefix + continuation
+            full_old_log_probs = (
+                [0.0] * original_prompt_len
+                + prefix_old_log_probs
+                + episode.old_log_probs
+                + [0.0] * (batch_max_length - batch_lengths[i])
+            )
+            batch_old_log_probs.append(full_old_log_probs)
+            
+            # Prefix mask：只对 prefix token 为 1（不包括原始 prompt）
+            prefix_mask = (
+                [0] * original_prompt_len
+                + [1] * prefix_len
+                + [0] * (len(episode.generated_token_ids) + batch_max_length - batch_lengths[i])
+            )
+            batch_prefix_masks.append(prefix_mask)
+            
+            # Continuation mask：只对 continuation token 为 1
+            continuation_mask = (
+                [0] * (original_prompt_len + prefix_len)
+                + [1] * len(episode.generated_token_ids)
+                + [0] * (batch_max_length - batch_lengths[i])
+            )
+            batch_continuation_masks.append(continuation_mask)
+        
+        batch_masks = batch_continuation_masks  # 保持兼容性，但实际使用 continuation_mask
         batch_advantages = [episode.reward for episode in batch_episodes]
         batch_token_ids = torch.tensor(batch_token_ids, device=device, dtype=torch.long)
         batch_old_log_probs = torch.tensor(batch_old_log_probs, device=device, dtype=torch.float32)
         batch_masks = torch.tensor(batch_masks, device=device, dtype=torch.bool)
+        batch_prefix_masks = torch.tensor(batch_prefix_masks, device=device, dtype=torch.bool) if enable_prefix else None
+        batch_continuation_masks = torch.tensor(batch_continuation_masks, device=device, dtype=torch.bool)
         batch_advantages = torch.tensor(
             batch_advantages, device=device, dtype=torch.float32
         )
@@ -286,7 +446,8 @@ def update_policy(
         with torch.autocast(device_type=device.type, dtype=dtype):
             input_token_ids = batch_token_ids[:, :-1]
             target_token_ids = batch_token_ids[:, 1:]
-            target_masks = batch_masks[:, 1:]
+            target_continuation_masks = batch_continuation_masks[:, 1:]  # 只对 continuation 计算 GRPO
+            target_prefix_masks = batch_prefix_masks[:, 1:] if enable_prefix and batch_prefix_masks is not None else None
             old_log_probs = batch_old_log_probs[:, 1:]
             logits = model.forward(input_token_ids).float()
             
@@ -306,15 +467,23 @@ def update_policy(
             reduction="none",
         ).reshape(input_token_ids.shape[0], -1)
 
-        # Compute KL loss if KL penalty is enabled
+        # Step 5: Prefix-SFT Loss（如果启用 prefix 模式）
+        prefix_sft_loss = torch.tensor(0.0, device=device)
+        if enable_prefix and target_prefix_masks is not None:
+            # 对 prefix token 计算 SFT loss（无论来源）
+            prefix_log_probs = log_probs * target_prefix_masks
+            prefix_sft_loss = -prefix_log_probs.sum() / (num_prefix_tokens + 1e-8)
+            prefix_sft_loss_total += prefix_sft_loss.item()
+
+        # Compute KL loss if KL penalty is enabled（只对 continuation）
         kl_loss = torch.tensor(0.0, device=device)
         if use_kl_penalty and ref_logits is not None:
             kl = compute_kl_loss(logits, ref_logits)
-            kl_loss = (kl * target_masks).sum() / num_target_tokens
+            kl_loss = (kl * target_continuation_masks).sum() / num_target_tokens  # 只对 continuation 计算 KL
 
         with torch.no_grad():
             token_entropy = compute_entropy(logits)
-            entropy = entropy + (token_entropy * target_masks).sum() / num_target_tokens
+            entropy = entropy + (token_entropy * target_continuation_masks).sum() / num_target_tokens  # 只对 continuation 计算 entropy
 
         # Compute objective based on selected method
         advantages = batch_advantages[:, None]
@@ -327,10 +496,15 @@ def update_policy(
             "clipped_ratio_sum": 0.0,
         }
         
+        # Step 6: Conditional GRPO Loss（只对 continuation token）
+        # 只对 continuation token 计算 ratio 和 advantage
+        continuation_log_probs = log_probs * target_continuation_masks
+        continuation_old_log_probs = old_log_probs * target_continuation_masks
+        
         if use_dynamic_clipping:
-            # Importance Sampling with Dynamic Adaptive Clipping
-            ratio = torch.exp(log_probs - old_log_probs)
-            q_x = torch.exp(old_log_probs)
+            # Importance Sampling with Dynamic Adaptive Clipping（只对 continuation）
+            ratio = torch.exp(continuation_log_probs - continuation_old_log_probs)
+            q_x = torch.exp(continuation_old_log_probs)
             
             # Dynamic bounds
             # L(x) = 0.5 + 0.5 * sqrt(max(1 - 4*eps_low/q(x), 0))
@@ -342,10 +516,11 @@ def update_policy(
             val_high = 1 + 4 * epsilon_high / (q_x + 1e-10)
             upper_bound = 0.5 + 0.5 * torch.sqrt(val_high)
             
-            # Track clipping statistics
-            clipped_lower = (ratio < lower_bound).sum().item()
-            clipped_upper = (ratio > upper_bound).sum().item()
-            total_tokens = ratio.numel()
+            # Track clipping statistics（只统计 continuation tokens）
+            continuation_ratio = ratio * target_continuation_masks
+            clipped_lower = (continuation_ratio < lower_bound).sum().item()
+            clipped_upper = (continuation_ratio > upper_bound).sum().item()
+            total_tokens = target_continuation_masks.sum().item()
             clip_stats = {
                 "clipped_lower": clipped_lower,
                 "clipped_upper": clipped_upper,
@@ -353,39 +528,44 @@ def update_policy(
             }
             
             clipped_ratio = torch.clamp(ratio, min=lower_bound, max=upper_bound)
-            clip_stats["ratio_sum"] = ratio.sum().item()
-            clip_stats["clipped_ratio_sum"] = clipped_ratio.sum().item()
+            clip_stats["ratio_sum"] = continuation_ratio.sum().item()
+            clip_stats["clipped_ratio_sum"] = (clipped_ratio * target_continuation_masks).sum().item()
             
             surr1 = ratio * advantages
             surr2 = clipped_ratio * advantages
             obj = torch.min(surr1, surr2)
+            # 只对 continuation 计算 objective
+            obj = obj * target_continuation_masks
         else:
             # PPO-style fixed clipping (only if clip_ratio > 0)
             if clip_ratio > 0.0:
-                ratio = torch.exp(log_probs - old_log_probs)
+                ratio = torch.exp(continuation_log_probs - continuation_old_log_probs)
                 clip_lower = 1.0 - clip_ratio
                 clip_upper = 1.0 + clip_ratio
             
-                # Track clipping statistics
-                clipped_lower = (ratio < clip_lower).sum().item()
-                clipped_upper = (ratio > clip_upper).sum().item()
-                total_tokens = ratio.numel()
+                # Track clipping statistics（只统计 continuation tokens）
+                continuation_ratio = ratio * target_continuation_masks
+                clipped_lower = (continuation_ratio < clip_lower).sum().item()
+                clipped_upper = (continuation_ratio > clip_upper).sum().item()
+                total_tokens = target_continuation_masks.sum().item()
                 clip_stats = {
                     "clipped_lower": clipped_lower,
                     "clipped_upper": clipped_upper,
                     "total": total_tokens,
-                    "ratio_sum": ratio.sum().item(),
+                    "ratio_sum": continuation_ratio.sum().item(),
                 }
             
                 clipped_ratio = torch.clamp(ratio, min=clip_lower, max=clip_upper)
-                clip_stats["clipped_ratio_sum"] = clipped_ratio.sum().item()
+                clip_stats["clipped_ratio_sum"] = (clipped_ratio * target_continuation_masks).sum().item()
             
                 surr1 = ratio * advantages
                 surr2 = clipped_ratio * advantages
                 obj = torch.min(surr1, surr2)
+                # 只对 continuation 计算 objective
+                obj = obj * target_continuation_masks
             else:
-                # No clipping: use original GRPO objective
-                obj = log_probs * advantages
+                # No clipping: use original GRPO objective（只对 continuation）
+                obj = continuation_log_probs * advantages
 
         # Accumulate clip statistics (both for dynamic and fixed clipping)
         total_clip_stats["clipped_lower"] += clip_stats["clipped_lower"]
@@ -394,9 +574,12 @@ def update_policy(
         total_clip_stats["ratio_sum"] += clip_stats["ratio_sum"]
         total_clip_stats["clipped_ratio_sum"] += clip_stats["clipped_ratio_sum"]
 
-        # per-token objective
-        obj = (obj * target_masks).sum() / num_target_tokens
-        loss = -obj
+        # Step 8: 总 Loss
+        # GRPO loss（只对 continuation）
+        grpo_loss = -(obj.sum() / num_target_tokens)
+        
+        # 总 loss = prefix-SFT loss + GRPO loss + KL loss
+        loss = prefix_sft_coeff * prefix_sft_loss + grpo_loss
         
         # Add KL penalty if enabled
         if use_kl_penalty:
@@ -415,6 +598,9 @@ def update_policy(
         "grad_norm": grad_norm.item(),
         "entropy": entropy.item(),
     }
+    
+    if enable_prefix:
+        result["prefix_sft_loss"] = prefix_sft_loss_total / num_micro_batches if num_micro_batches > 0 else 0.0
     
     if use_kl_penalty:
         result["kl_loss"] = kl_loss.item() if isinstance(kl_loss, torch.Tensor) else kl_loss
