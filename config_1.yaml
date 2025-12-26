@@ -6,7 +6,7 @@ model:
 data:
   path: "gsm8k"          # ← 你的 GSM8K 数据存放目录
   config_name: "main"    # ← 可选: "main" 或 "socratic"
-  test_size: 128
+  test_size: 256
 
 training:
   random_seed: 1337
