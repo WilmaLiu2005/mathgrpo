@@ -180,5 +180,6 @@ Qwen2.5-3B-base/
 ckpt/
 logs/
 wandb/
+prefixes.json
 
 .vscode/
