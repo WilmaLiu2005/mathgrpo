@@ -57,7 +57,7 @@ training:
   use_length_grouping: false     # 是否使用长度分组进行 reward 归一化
   
   # Prefix 训练模式配置
-  enable_prefix: false            # 是否启用 prefix 训练模式
+  enable_prefix: true            # 是否启用 prefix 训练模式
   prefix_file: "/data/liuxinyu/prefixes.json"              # Prefix 文件路径（JSON格式，由 generate_prefixes.py 生成）
                                  # 如果为 null，则训练时不会使用预生成的 prefix
   prefix_dropout_prob: 1.0       # Prefix dropout 概率（使用 DeepSeek 的概率，否则用 3B 采样）
@@ -73,7 +73,7 @@ wandb:
   enable: true
   project: mathgrpo
   entity: amdyes   # 可选
-  run_name: "final_baseline_1226"                    # 为空则用时间戳
+  run_name: "deepseek_prefix_1226"                    # 为空则用时间戳
   mode: online                    # 或 offline/disabled
   watch_model: false              # 是否记录梯度/参数直方图
   watch_log_freq: 100

@@ -54,7 +54,7 @@ training:
   kl_coeff: 0.02          # KL 散度正则项系数（仅在 use_kl_penalty=true 时生效）
   
   # Reward 归一化参数
-  use_length_grouping: false     # 是否使用长度分组进行 reward 归一化
+  use_length_grouping: true     # 是否使用长度分组进行 reward 归一化
   
   # Prefix 训练模式配置
   enable_prefix: false            # 是否启用 prefix 训练模式
@@ -73,7 +73,7 @@ wandb:
   enable: true
   project: mathgrpo
   entity: amdyes   # 可选
-  run_name: "final_baseline_1226"                    # 为空则用时间戳
+  run_name: "dynamic_length_grouping_1226"                    # 为空则用时间戳
   mode: online                    # 或 offline/disabled
   watch_model: false              # 是否记录梯度/参数直方图
   watch_log_freq: 100

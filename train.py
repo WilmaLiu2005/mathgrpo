@@ -1,5 +1,6 @@
 import html
 import time
+import json
 from argparse import ArgumentParser
 from datetime import datetime
 from pathlib import Path
@@ -51,7 +52,7 @@ def sample_trace_by_length_group(episodes):
             sampled[k] = random.choice(v)
     return sampled
 
-def evaluate(model, tokenizer, device, dtype, config, global_step):
+def evaluate(model, tokenizer, device, dtype, config, global_step, timestamp=None, safe_run_name=None):
     test_dataset = GSM8KDataset(
         data_path=config["data"]["path"],
         tokenizer=tokenizer,
@@ -72,6 +73,8 @@ def evaluate(model, tokenizer, device, dtype, config, global_step):
     success = []
     lengths = []
     all_episodes = []
+    all_eval_results = []  # 用于保存评估结果
+    
     for batch in dataloader:
             episodes = rollout(
                 model=model,
@@ -89,12 +92,53 @@ def evaluate(model, tokenizer, device, dtype, config, global_step):
             all_episodes.extend(episodes)
             success.extend([episode.reward_info["answer_reward"] for episode in episodes])
             lengths.extend([len(episode.generated_token_ids) for episode in episodes])
+            
+            # 收集评估结果详细信息
+            # 注意：由于 num_answer_per_question=1，episodes 的长度应该等于 batch.questions 的长度
+            assert len(episodes) == len(batch.questions), f"Episodes length ({len(episodes)}) != batch questions length ({len(batch.questions)})"
+            for i, episode in enumerate(episodes):
+                eval_result = {
+                    "global_step": global_step,
+                    "question": batch.questions[i],
+                    "gold_answer": batch.answers[i],
+                    "generated_text": episode.text,
+                    "prefix": episode.prefix,
+                    "is_finished": episode.is_finished,
+                    "reward": float(episode.reward),
+                    "format_reward": float(episode.reward_info.get("format_reward", 0.0)),
+                    "answer_reward": float(episode.reward_info.get("answer_reward", 0.0)),
+                    "is_correct": bool(episode.reward_info.get("answer_reward", 0.0) > 0.0),
+                    "response_length": len(episode.generated_token_ids),
+                    "prefix_length": episode.prefix_length,
+                    "prefix_source": episode.prefix_source,
+                }
+                all_eval_results.append(eval_result)
         
     # 采样trace
     sampled_traces = sample_trace_by_length_group(all_episodes)
     for group, ep in sampled_traces.items():
         print(f"[{group}] trace: {ep.text[:200]} ...")  # 只打印前200字符
         wandb.log({f"eval_trace/{group}": wandb.Html(f"<pre>{ep.text}</pre>")}, step=global_step)
+    
+    # 保存评估结果到 JSONL 文件
+    # 使用传入的时间戳和 run_name（如果未提供则生成新的）
+    if timestamp is None:
+        timestamp = datetime.now().strftime(r"%Y%m%d-%H%M%S")
+    if safe_run_name is None:
+        run_name = config["wandb"].get("run_name", "baseline")
+        safe_run_name = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in run_name)
+    
+    base_dir = Path(config["training"].get("eval_results_dir", "eval_results"))
+    eval_results_dir = base_dir / f"{timestamp}_{safe_run_name}"
+    eval_results_dir.mkdir(parents=True, exist_ok=True)
+    output_file = eval_results_dir / f"eval_results_step_{global_step:06d}.jsonl"
+    
+    with open(output_file, "w", encoding="utf-8") as f:
+        for result in all_eval_results:
+            f.write(json.dumps(result, ensure_ascii=False) + "\n")
+    
+    print(f"Saved {len(all_eval_results)} evaluation results to {output_file}")
+    
     return np.mean(success), np.mean(lengths)
 
 def main(config_path: str):
@@ -128,6 +172,10 @@ def main(config_path: str):
 
     current_time = datetime.now().strftime(r"%Y%m%d-%H%M%S")
     tb_writer = SummaryWriter(log_dir=f"{config['training']['log_dir']}/{current_time}")
+    
+    # 生成用于评估结果保存的时间戳和 run_name
+    run_name = config["wandb"].get("run_name", "baseline")
+    safe_run_name = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in run_name)
 
     tokenizer = Tokenizer(str(pretrained_model_path / "tokenizer.json"))
 
@@ -261,7 +309,7 @@ def main(config_path: str):
 
             # Eval 按 global_step 触发
             if global_step % config["training"]["eval_interval"] == 0:
-                eval_success_rate, eval_mean_len = evaluate(model, tokenizer, device, dtype, config, global_step)
+                eval_success_rate, eval_mean_len = evaluate(model, tokenizer, device, dtype, config, global_step, current_time, safe_run_name)
                 print(f"\rEval success rate: {eval_success_rate:.2f}, Eval mean len: {eval_mean_len:.2f}" + " " * 100)
                 tb_writer.add_scalar("success_rate/eval", eval_success_rate, global_step)
                 tb_writer.add_scalar("mean_response_len/eval", eval_mean_len, global_step)
