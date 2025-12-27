@@ -183,3 +183,5 @@ wandb/
 prefixes.json
 
 .vscode/
+
+eval_results/
