@@ -198,10 +198,12 @@ def main(config_path: str):
 
     model = Transformer.from_pretrained(pretrained_model_path, device=device).train()
 
-    ref_model = deepcopy(model)
-    ref_model.eval()
-    for p in ref_model.parameters():
-        p.requires_grad = False    
+    ref_model = None
+    if config["training"].get("use_kl_penalty", False):
+        ref_model = deepcopy(model)
+        ref_model.eval()
+        for p in ref_model.parameters():
+            p.requires_grad = False    
 
     optimizer = MemoryEfficientAdamW(
         model.parameters(),
@@ -213,6 +215,8 @@ def main(config_path: str):
 
     ckpt_dir = Path(config["training"]["ckpt_dir"])
     ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    use_similarity_weighting = config["training"].get("use_similarity_weighting", False)
 
     # ---------------------------
     # 新增：多 epoch / 全局步数 控制
@@ -246,6 +250,12 @@ def main(config_path: str):
             if config["training"]["skip_unfinished_episodes"]:
                 episodes = [ep for ep in episodes if ep.is_finished]
 
+            process_rewards_kwargs = dict(device=device, dtype=dtype)
+            process_rewards_kwargs["use_similarity_weighting"] = use_similarity_weighting
+            if use_similarity_weighting:
+                process_rewards_kwargs["model"] = model
+                process_rewards_kwargs.update(config["training"].get("similarity_weighting_config", dict()))
+
             results = update_policy(
                 model=model,
                 optimizer=optimizer,
@@ -265,6 +275,7 @@ def main(config_path: str):
                 clip_ratio=config["training"].get("clip_ratio", 0.2),
                 enable_prefix=config["training"].get("enable_prefix", False),
                 prefix_sft_coeff=config["training"].get("prefix_sft_coeff", 0.2),
+                process_reward_kwargs=process_rewards_kwargs,
             )
 
             torch.cuda.synchronize()

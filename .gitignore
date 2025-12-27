@@ -183,3 +183,6 @@ wandb/
 prefixes.json
 
 .vscode/
+
+eval_results/
+Qwen2.5-3B/

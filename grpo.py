@@ -7,6 +7,7 @@ from typing import Callable, List, Optional
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from data_types import Episode, MiniBatch
 from qwen2_model import Transformer
@@ -257,10 +258,55 @@ def rollout(
     print("\r", end=" " * 100, flush=True)
     return episodes
 
+def get_rewards_from_episodes(
+    episodes: List[Episode], 
+    use_similarity_weighting: bool = False, 
+    model: Transformer = None, 
+    dtype = torch.float32, 
+    device = "cuda",
+    tau = 1.0,
+    depth = 4,
+) -> List[float]:
+    if not use_similarity_weighting:
+        return [episode.reward for episode in episodes]
+    assert model is not None, "model should not be None if use_similarity_weighting is True"
 
-def normalize_rewards_per_group(episodes: List[Episode], use_length_grouping: bool = False) -> List[Episode]:
+    model.eval()
+
+    rewards = torch.tensor(
+        [episode.reward for episode in episodes],
+        dtype=dtype,
+        device=device
+    )  # (N,)
+
+    responses = [episode.generated_token_ids for episode in episodes]
+    hidden_states = []
+    for response in responses:
+        input = torch.tensor(response, dtype=torch.long, device=device).unsqueeze(0)
+        h = model.forward_hidden_state(input, depth=depth) # (1, D)
+        hidden_states.append(h.detach())
+    hidden_states = torch.concat(hidden_states, dim=0) # (N, D)
+
+    hidden_states = F.normalize(hidden_states, dim=-1)
+    sim_matrix = hidden_states @ hidden_states.T # (N, N)
+
+    N = sim_matrix.size(0)
+    mask = torch.eye(N, device=sim_matrix.device, dtype=torch.bool)
+    sim_matrix = sim_matrix.masked_fill(mask, float("-inf"))
+
+    sim_weights = F.softmax(sim_matrix / tau, dim=-1)
+
+    # \tilde r_i = r_i - sum_j s_ij * r_j
+    weighted_baseline = sim_weights @ rewards
+    adjusted_rewards = rewards - weighted_baseline
+
+    model.train()
+
+    return adjusted_rewards.tolist()
+
+def normalize_rewards_per_group(episodes: List[Episode], use_length_grouping: bool = False, process_reward_kwargs: dict = dict()) -> List[Episode]:
     """Normalize rewards per group. A group is defined by the prefix (and optionally response length bucket)."""
-    groups = defaultdict(list)
+    groups = defaultdict(list[Episode])
     
     if use_length_grouping:
         # Compute length distribution statistics
@@ -292,7 +338,7 @@ def normalize_rewards_per_group(episodes: List[Episode], use_length_grouping: bo
         
     output = []
     for group in groups.values():
-        group_rewards = [item.reward for item in group]
+        group_rewards = get_rewards_from_episodes(group, **process_reward_kwargs)
         mean_reward = np.mean(group_rewards)
         std_reward = np.std(group_rewards)
         for episode in group:
@@ -337,6 +383,7 @@ def update_policy(
     clip_ratio: float = 0.2,
     enable_prefix: bool = False,
     prefix_sft_coeff: float = 0.2,
+    process_reward_kwargs: dict = dict(),
 ):
     """Update the policy using the GRPO algorithm.
     
@@ -358,7 +405,7 @@ def update_policy(
         use_kl_penalty: Whether to use KL penalty
         clip_ratio: Fixed clip ratio for PPO-style clipping (when use_dynamic_clipping=False)
     """
-    episodes = normalize_rewards_per_group(episodes, use_length_grouping=use_length_grouping)
+    episodes = normalize_rewards_per_group(episodes, use_length_grouping=use_length_grouping, process_reward_kwargs=process_reward_kwargs)
     # sort episodes by token length for efficient (micro-)batching
     episodes.sort(key=lambda x: len(x.prefix_token_ids) + len(x.generated_token_ids))
     num_micro_batches = math.ceil(len(episodes) / micro_batch_size)

@@ -264,6 +264,20 @@ class Transformer(nn.Module):
             pipe, len(pipe), h, use_reentrant=False
         )
 
+    @torch.no_grad()
+    def forward_hidden_state(self, tokens: torch.Tensor, depth: int = 4):
+        _bsz, seqlen = tokens.shape
+        h = self.embed_tokens(tokens)
+        pos = torch.arange(0, seqlen, device=tokens.device, dtype=torch.int32)
+        pos_emb = self.rotary_emb(h, pos[None, :])
+
+        for idx, layer in enumerate(self.layers):
+            h = layer(h, pos_emb)
+            if (idx + 1) == depth:
+                return torch.mean(h, dim=1, keepdim=False)
+            
+        raise ValueError(f"Depth {depth} is greater than num layers {len(self.layers)}.")
+
     def inference(self, tokens: torch.Tensor, start_pos: Union[int, torch.Tensor]):
         _bsz, seqlen = tokens.shape
         del _bsz
