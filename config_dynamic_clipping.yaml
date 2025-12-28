@@ -1,10 +1,10 @@
 model:
   pretrained_model_path: "/home/student008/GRPO-zero/Qwen2.5-3B-base/models--Qwen--Qwen2.5-3B/snapshots/3aab1f1954e9cc14eb9509a215f9e5ca08227a9b"
-  device: "cuda:7"
+  device: "cuda:1"
   dtype: "bfloat16"
 
 data:
-  path: "/home/student008/GRPO-Zero/gsm8k"          # ← 你的 GSM8K 数据存放目录
+  path: "/home/student008/GRPO-zero/gsm8k"          # ← 你的 GSM8K 数据存放目录
   config_name: "main"    # ← 可选: "main" 或 "socratic"
   test_size: 128
 
@@ -42,7 +42,7 @@ training:
 
   # GRPO 算法相关配置
   # Dynamic Clipping 参数
-  use_dynamic_clipping: false   # 是否使用 dynamic clipping（true=动态裁剪，false=固定裁剪PPO风格）
+  use_dynamic_clipping: true   # 是否使用 dynamic clipping（true=动态裁剪，false=固定裁剪PPO风格）
   epsilon_low: 0.2              # Dynamic clipping 下界参数
   epsilon_high: 1.2             # Dynamic clipping 上界参数
   
@@ -55,13 +55,13 @@ training:
   
   # Reward 归一化参数
   use_length_grouping: false     # 是否使用长度分组进行 reward 归一化
-  use_difficulty_grouping: true # 是否使用难度分组进行 reward 归一化
+  use_difficulty_grouping: false # 是否使用难度分组进行 reward 归一化
   
 wandb:
   enable: true
   project: mathgrpo
   entity: 17701248665-tsinghua-university   # 可选
-  run_name: "difficulty_grouping_1227"                    # 为空则用时间戳
+  run_name: "dynamic_clipping_1227"                    # 为空则用时间戳
   mode: online                    # 或 offline/disabled
   watch_model: false              # 是否记录梯度/参数直方图
   watch_log_freq: 100

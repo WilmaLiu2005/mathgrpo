@@ -1,4 +1,5 @@
 import html
+import json
 import time
 from argparse import ArgumentParser
 from datetime import datetime
@@ -71,6 +72,8 @@ def evaluate(model, tokenizer, device, dtype, config, global_step):
     success = []
     lengths = []
     all_episodes = []
+    all_eval_results = []  # 用于保存评估结果
+    
     for batch in dataloader:
         episodes = rollout(
             model=model,
@@ -87,11 +90,45 @@ def evaluate(model, tokenizer, device, dtype, config, global_step):
         success.extend([episode.reward_info["answer_reward"] for episode in episodes])
         lengths.extend([len(episode.generated_token_ids) for episode in episodes])
         
+        # 收集评估结果详细信息
+        # 注意：由于 num_answer_per_question=1，episodes 的长度应该等于 batch.questions 的长度
+        assert len(episodes) == len(batch.questions), f"Episodes length ({len(episodes)}) != batch questions length ({len(batch.questions)})"
+        for i, episode in enumerate(episodes):
+            eval_result = {
+                "global_step": global_step,
+                "question": batch.questions[i],
+                "gold_answer": batch.answers[i],
+                "generated_text": episode.text,
+                "prefix": episode.prefix,
+                "is_finished": episode.is_finished,
+                "reward": float(episode.reward),
+                "format_reward": float(episode.reward_info.get("format_reward", 0.0)),
+                "answer_reward": float(episode.reward_info.get("answer_reward", 0.0)),
+                "is_correct": bool(episode.reward_info.get("answer_reward", 0.0) > 0.0),
+                "response_length": len(episode.generated_token_ids),
+            }
+            all_eval_results.append(eval_result)
+        
     # 采样trace
     sampled_traces = sample_trace_by_length_group(all_episodes)
     for group, ep in sampled_traces.items():
         print(f"[{group}] trace: {ep.text[:200]} ...")  # 只打印前200字符
         wandb.log({f"eval_trace/{group}": wandb.Html(f"<pre>{ep.text}</pre>")}, step=global_step)
+    
+    # 保存评估结果到 JSONL 文件
+    # 使用 wandb 的 run_name 作为目录名
+    run_name = config["wandb"].get("run_name", "baseline")
+    eval_results_dir = Path(config["training"].get("eval_results_dir", "eval_results"))
+    eval_results_subdir = eval_results_dir / run_name
+    eval_results_subdir.mkdir(parents=True, exist_ok=True)
+    output_file = eval_results_subdir / f"eval_results_step_{global_step:06d}.jsonl"
+    
+    with open(output_file, "w", encoding="utf-8") as f:
+        for result in all_eval_results:
+            f.write(json.dumps(result, ensure_ascii=False) + "\n")
+    
+    print(f"Saved {len(all_eval_results)} evaluation results to {output_file}")
+    
     return np.mean(success), np.mean(lengths)
 
 def main(config_path: str):

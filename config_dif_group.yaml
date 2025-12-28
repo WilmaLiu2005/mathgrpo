@@ -4,7 +4,7 @@ model:
   dtype: "bfloat16"
 
 data:
-  path: "/home/student008/GRPO-Zero/gsm8k"          # ← 你的 GSM8K 数据存放目录
+  path: "/home/student008/GRPO-zero/gsm8k"          # ← 你的 GSM8K 数据存放目录
   config_name: "main"    # ← 可选: "main" 或 "socratic"
   test_size: 128
 

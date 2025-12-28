@@ -182,3 +182,6 @@ logs/
 wandb/
 
 .vscode/
+
+eval_results/
+prefixes.json
