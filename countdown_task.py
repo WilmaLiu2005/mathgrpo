@@ -15,6 +15,7 @@ SYSTEM_MESSAGE = (
 
 USER_TEMPLATE = (
     "Solve the following math word problem.\n"
+    "Show your work by writing out calculations in the format <<expression=result>> (e.g., <<5+3=8>>).\n"
     "Provide your reasoning inside <think></think> tags, "
     "and put the final numeric answer inside <answer></answer> tags.\n\n"
     "Problem: {question}"
@@ -169,6 +170,40 @@ def answer_reward_function_gsm8k(response: str, gold_answer: str) -> float:
     return 0.0
 
 
+def check_step_accuracy(response: str) -> float:
+    """
+    Parses <<expression=result>> patterns and verifies their correctness.
+    Returns the fraction of correct steps.
+    """
+    pattern = r"<<([^=]+)=([^>]+)>>"
+    matches = re.findall(pattern, response)
+    
+    if not matches:
+        return 0.0
+        
+    correct_steps = 0
+    for expr, result in matches:
+        try:
+            # Allow only basic math characters for safety
+            if not re.match(r"^[\d\.\+\-\*\/\(\)\s]+$", expr):
+                continue
+            
+            # Calculate expected value
+            # eval is generally unsafe, but here we strictly filtered the input characters
+            expected = eval(expr)
+            
+            # Parse claimed result
+            claimed = float(result.strip())
+            
+            # Check equality with tolerance
+            if abs(expected - claimed) < 1e-4:
+                correct_steps += 1
+        except:
+            continue
+            
+    return correct_steps / len(matches)
+
+
 def reward_function(response: str, question=None, answer=None, end_token=None):
     """
     where answer_reward is correctness of the GSM8K final answer
@@ -179,11 +214,19 @@ def reward_function(response: str, question=None, answer=None, end_token=None):
 
     # GSM8K correctness reward
     answer_reward = answer_reward_function_gsm8k(response, gold_answer=answer)
+    
+    # Step-by-step partial reward
+    step_reward = 0.0
+    # Only give partial credit if the final answer is incorrect
+    if answer_reward < 1.0:
+        step_accuracy = check_step_accuracy(response)
+        step_reward = step_accuracy * 0.4  # Max 0.4 partial credit for correct steps
 
     return {
-        "reward": format_penalty + answer_reward,
+        "reward": format_penalty + answer_reward + step_reward,
         "reward_info": {
             "format_reward": format_penalty,
             "answer_reward": answer_reward,
+            "step_reward": step_reward,
         },
     }

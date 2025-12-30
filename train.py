@@ -243,6 +243,7 @@ def main(config_path: str):
             std_reward = float(np.std(reward)) if reward else 0.0
             success_rate = float(np.mean(answer_reward)) if answer_reward else 0.0
             mean_format_reward = float(np.mean(format_reward_list)) if format_reward_list else 0.0
+            mean_step_reward = float(np.mean([ep.reward_info.get("step_reward", 0.0) for ep in episodes])) if episodes else 0.0
             grad_norm = results["grad_norm"]
             entropy = results["entropy"]
             lr = optimizer.param_groups[0]["lr"]
@@ -282,6 +283,7 @@ def main(config_path: str):
             tb_writer.add_scalar("std_reward", std_reward, global_step)
             tb_writer.add_scalar("success_rate/train", success_rate, global_step)
             tb_writer.add_scalar("format_reward", mean_format_reward, global_step)
+            tb_writer.add_scalar("step_reward", mean_step_reward, global_step)
             tb_writer.add_scalar("grad_norm", grad_norm, global_step)
             tb_writer.add_scalar("duration", duration, global_step)
             tb_writer.add_scalar("num_finished_episodes", num_finished_episodes, global_step)
@@ -301,6 +303,7 @@ def main(config_path: str):
                 "std_reward": std_reward,
                 "success_rate/train": success_rate,
                 "format_reward": mean_format_reward,
+                "step_reward": mean_step_reward,
                 "grad_norm": grad_norm,
                 "duration": duration,
                 "num_finished_episodes": num_finished_episodes,
