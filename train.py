@@ -88,6 +88,7 @@ def evaluate(model, tokenizer, device, dtype, config, global_step, timestamp=Non
                 temperature=config["training"].get("temperature", 1.0),
                 enable_prefix=config["training"].get("enable_prefix", False),
                 prefix_dropout_prob=config["training"].get("prefix_dropout_prob", 0.5),
+                prefix_use_prob=0.0,  # eval时总是设为0.0，不使用prefix（与训练分布一致）
             )
             all_episodes.extend(episodes)
             success.extend([episode.reward_info["answer_reward"] for episode in episodes])
@@ -241,6 +242,7 @@ def main(config_path: str):
                 temperature=config["training"].get("temperature", 1.0),
                 enable_prefix=config["training"].get("enable_prefix", False),
                 prefix_dropout_prob=config["training"].get("prefix_dropout_prob", 0.5),
+                prefix_use_prob=config["training"].get("prefix_use_prob", 1.0),  # 训练时使用prefix的概率
             )
 
             if config["training"]["skip_unfinished_episodes"]:
