@@ -262,10 +262,13 @@ def get_rewards_from_episodes(
     episodes: List[Episode], 
     use_similarity_weighting: bool = False, 
     model: Transformer = None, 
+    pad_token_id: int = 0,
     dtype = torch.float32, 
     device = "cuda",
     tau = 1.0,
     depth = 4,
+    alpha = 0.1,
+    fix_model = True,
 ) -> List[float]:
     if not use_similarity_weighting:
         return [episode.reward for episode in episodes]
@@ -282,6 +285,8 @@ def get_rewards_from_episodes(
     responses = [episode.generated_token_ids for episode in episodes]
     hidden_states = []
     for response in responses:
+        if response == []:
+            response = [pad_token_id] # fix empty response
         input = torch.tensor(response, dtype=torch.long, device=device).unsqueeze(0)
         h = model.forward_hidden_state(input, depth=depth) # (1, D)
         hidden_states.append(h.detach())
@@ -292,15 +297,16 @@ def get_rewards_from_episodes(
 
     N = sim_matrix.size(0)
     mask = torch.eye(N, device=sim_matrix.device, dtype=torch.bool)
-    sim_matrix = sim_matrix.masked_fill(mask, float("-inf"))
+    sim_matrix = sim_matrix.masked_fill(mask, -float("inf"))
 
     sim_weights = F.softmax(sim_matrix / tau, dim=-1)
 
-    # \tilde r_i = r_i - sum_j s_ij * r_j
+    # \tilde r_i = r_i - alpha * sum_j s_ij * r_j
     weighted_baseline = sim_weights @ rewards
-    adjusted_rewards = rewards - weighted_baseline
+    adjusted_rewards = (1-alpha) * rewards + alpha * weighted_baseline
 
-    model.train()
+    if not fix_model:
+        model.train()
 
     return adjusted_rewards.tolist()
 

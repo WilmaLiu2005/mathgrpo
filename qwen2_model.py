@@ -274,7 +274,7 @@ class Transformer(nn.Module):
         for idx, layer in enumerate(self.layers):
             h = layer(h, pos_emb)
             if (idx + 1) == depth:
-                return torch.mean(h, dim=1, keepdim=False)
+                return h[:, -1, :]
             
         raise ValueError(f"Depth {depth} is greater than num layers {len(self.layers)}.")
 

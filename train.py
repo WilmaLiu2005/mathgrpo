@@ -198,8 +198,11 @@ def main(config_path: str):
 
     model = Transformer.from_pretrained(pretrained_model_path, device=device).train()
 
+    use_similarity_weighting = config["training"].get("use_similarity_weighting", False)
+    use_ref_for_similarity_weighting = config["training"].get("use_ref_for_similarity_weighting", False)
+
     ref_model = None
-    if config["training"].get("use_kl_penalty", False):
+    if config["training"].get("use_kl_penalty", False) or use_similarity_weighting:
         ref_model = deepcopy(model)
         ref_model.eval()
         for p in ref_model.parameters():
@@ -215,8 +218,6 @@ def main(config_path: str):
 
     ckpt_dir = Path(config["training"]["ckpt_dir"])
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-
-    use_similarity_weighting = config["training"].get("use_similarity_weighting", False)
 
     # ---------------------------
     # 新增：多 epoch / 全局步数 控制
@@ -250,10 +251,11 @@ def main(config_path: str):
             if config["training"]["skip_unfinished_episodes"]:
                 episodes = [ep for ep in episodes if ep.is_finished]
 
-            process_rewards_kwargs = dict(device=device, dtype=dtype)
+            process_rewards_kwargs = dict(device=device, dtype=dtype, pad_token_id=tokenizer.pad_token_id)
             process_rewards_kwargs["use_similarity_weighting"] = use_similarity_weighting
             if use_similarity_weighting:
-                process_rewards_kwargs["model"] = model
+                process_rewards_kwargs["model"] = ref_model if use_ref_for_similarity_weighting else model
+                process_rewards_kwargs["fix_model"] = use_ref_for_similarity_weighting
                 process_rewards_kwargs.update(config["training"].get("similarity_weighting_config", dict()))
 
             results = update_policy(

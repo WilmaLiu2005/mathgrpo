@@ -70,15 +70,17 @@ training:
   # 3. 设置 enable_prefix: true 开始训练
 
   use_similarity_weighting: true
+  use_ref_for_similarity_weighting: false
   similarity_weighting_config: 
     depth: 9
+    alpha: 0.05
     tau: 1.0
   
 wandb:
   enable: true
   project: mathgrpo
   entity: amdyes   # 可选
-  run_name: "similarity_weighting_1227_mask_self"                    # 为空则用时间戳
+  run_name: "similarity_weighting_1230_softmax_smoothing_mask_self_tau_1.0_alpha_0.05"                    # 为空则用时间戳
   mode: online                    # 或 offline/disabled
   watch_model: false              # 是否记录梯度/参数直方图
   watch_log_freq: 100
