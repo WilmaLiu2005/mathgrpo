@@ -202,7 +202,7 @@ def main(config_path: str):
     use_ref_for_similarity_weighting = config["training"].get("use_ref_for_similarity_weighting", False)
 
     ref_model = None
-    if config["training"].get("use_kl_penalty", False) or use_similarity_weighting:
+    if config["training"].get("use_kl_penalty", False) or use_ref_for_similarity_weighting:
         ref_model = deepcopy(model)
         ref_model.eval()
         for p in ref_model.parameters():
