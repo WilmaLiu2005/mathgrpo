@@ -18,8 +18,8 @@ training:
   # 采样参数
   temperature: 0.9            # 采样温度，控制随机性（1.0=标准采样，>1.0=更随机，<1.0=更确定）
 
-  batch_size: 128
-  num_questions_per_batch: 32
+  batch_size: 64
+  num_questions_per_batch: 16
 
   micro_batch_size: 8
   max_grad_norm: 1.0
@@ -57,7 +57,7 @@ training:
   use_length_grouping: false     # 是否使用长度分组进行 reward 归一化
   
   # 跨组难度感知优势缩放参数
-  use_difficulty_aware_scaling: false  # 是否使用跨组难度感知优势缩放（true=启用，false=禁用）
+  use_difficulty_aware_scaling: true  # 是否使用跨组难度感知优势缩放（true=启用，false=禁用）
                                         # 如果启用，会根据问题难度对优势值进行缩放：
                                         # - 难题（平均奖励低于batch平均）权重 > 1.0
                                         # - 简单题（平均奖励高于batch平均）权重 < 1.0

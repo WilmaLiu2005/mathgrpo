@@ -322,6 +322,80 @@ def normalize_rewards_per_group(episodes: List[Episode], use_length_grouping: bo
     return output
 
 
+def apply_difficulty_aware_scaling(
+    episodes: List[Episode], 
+    num_answer_per_question: int,
+    difficulty_weight_min: float = 0.5,
+    difficulty_weight_max: float = 2.0,
+) -> List[Episode]:
+    """
+    跨组难度感知优势缩放
+    
+    1. 计算当前 Batch 中所有问题的平均奖励（评估任务整体难度）
+    2. 计算每个问题的平均奖励
+    3. 如果问题平均 < Batch 平均（难题），权重 > 1.0
+    4. 如果问题平均 > Batch 平均（简单题），权重 < 1.0
+    5. 将权重 clip 到 [difficulty_weight_min, difficulty_weight_max] 范围
+    6. 将优势值（reward）乘以这个权重
+    
+    Args:
+        episodes: List of episodes from rollout
+        num_answer_per_question: Number of answers sampled per question
+        difficulty_weight_min: Minimum value for difficulty weight (default: 0.5)
+        difficulty_weight_max: Maximum value for difficulty weight (default: 2.0)
+    
+    Returns:
+        List of episodes with scaled rewards
+    """
+    if len(episodes) == 0:
+        return episodes
+    
+    # 计算整个 Batch 的平均奖励（评估任务整体难度）
+    all_rewards = [ep.reward for ep in episodes]
+    batch_mean_reward = np.mean(all_rewards)
+    
+    # 如果 batch_mean_reward 太小或为0，不进行缩放
+    if abs(batch_mean_reward) < 1e-6:
+        return episodes
+    
+    # 按问题分组并计算每个问题的平均奖励
+    num_questions = len(episodes) // num_answer_per_question
+    if num_questions == 0:
+        return episodes
+    
+    output = []
+    for i in range(num_questions):
+        # 获取该问题的所有答案
+        question_start_idx = i * num_answer_per_question
+        question_end_idx = (i + 1) * num_answer_per_question
+        question_episodes = episodes[question_start_idx:question_end_idx]
+        
+        # 计算该问题的平均奖励
+        question_rewards = [ep.reward for ep in question_episodes]
+        question_mean_reward = np.mean(question_rewards)
+        
+        # 计算难度权重
+        # 如果问题平均 < Batch 平均（难题），权重 > 1.0
+        # 如果问题平均 > Batch 平均（简单题），权重 < 1.0
+        # 权重公式：batch_mean / question_mean
+        if abs(question_mean_reward) < 1e-6:
+            # 如果问题平均奖励太小，使用默认权重 1.0
+            difficulty_weight = 1.0
+        else:
+            difficulty_weight = batch_mean_reward / (question_mean_reward + 1e-6)
+        
+        # Clip 权重到指定范围，防止权重过大或过小导致训练不稳定
+        difficulty_weight = np.clip(difficulty_weight, difficulty_weight_min, difficulty_weight_max)
+        
+        # 为每个答案应用相同的权重
+        for episode in question_episodes:
+            scaled_reward = episode.reward * difficulty_weight
+            episode = dataclasses.replace(episode, reward=scaled_reward)
+            output.append(episode)
+    
+    return output
+
+
 def compute_entropy(logits: torch.Tensor) -> torch.Tensor:
     probs = torch.nn.functional.softmax(logits, dim=-1)
     entropy = torch.logsumexp(logits, dim=-1) - torch.sum(probs * logits, dim=-1)
@@ -357,6 +431,10 @@ def update_policy(
     clip_ratio: float = 0.2,
     enable_prefix: bool = False,
     prefix_sft_coeff: float = 0.2,
+    use_difficulty_aware_scaling: bool = False,
+    num_answer_per_question: int = 1,
+    difficulty_weight_min: float = 0.5,
+    difficulty_weight_max: float = 2.0,
 ):
     """Update the policy using the GRPO algorithm.
     
@@ -377,8 +455,23 @@ def update_policy(
         use_dynamic_clipping: Whether to use dynamic clipping
         use_kl_penalty: Whether to use KL penalty
         clip_ratio: Fixed clip ratio for PPO-style clipping (when use_dynamic_clipping=False)
+        enable_prefix: Whether to enable prefix training mode
+        prefix_sft_coeff: Coefficient for prefix-SFT loss
+        use_difficulty_aware_scaling: Whether to use difficulty-aware advantage scaling
+        num_answer_per_question: Number of answers sampled per question (required if use_difficulty_aware_scaling=True)
+        difficulty_weight_min: Minimum value for difficulty weight clipping (default: 0.5)
+        difficulty_weight_max: Maximum value for difficulty weight clipping (default: 2.0)
     """
     episodes = normalize_rewards_per_group(episodes, use_length_grouping=use_length_grouping)
+    
+    # Apply difficulty-aware scaling if enabled
+    if use_difficulty_aware_scaling:
+        episodes = apply_difficulty_aware_scaling(
+            episodes, 
+            num_answer_per_question,
+            difficulty_weight_min=difficulty_weight_min,
+            difficulty_weight_max=difficulty_weight_max,
+        )
     # sort episodes by token length for efficient (micro-)batching
     episodes.sort(key=lambda x: len(x.prefix_token_ids) + len(x.generated_token_ids))
     num_micro_batches = math.ceil(len(episodes) / micro_batch_size)

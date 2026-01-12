@@ -157,7 +157,22 @@ def main(config_path: str):
     )
 
     pretrained_model_path = Path(config["model"]["pretrained_model_path"])
-    device = torch.device(config["model"]["device"])
+    
+    # 多 GPU 支持
+    use_multi_gpu = config["model"].get("use_multi_gpu", False)
+    if use_multi_gpu:
+        # 使用多 GPU，主设备为第一个 GPU
+        device_ids = config["model"].get("device_ids", None)
+        if device_ids is None:
+            # 如果没有指定，使用所有可用 GPU
+            device_ids = list(range(torch.cuda.device_count()))
+        device = torch.device(f"cuda:{device_ids[0]}")
+        print(f"Using multi-GPU training on devices: {device_ids}")
+    else:
+        # 单 GPU 模式
+        device = torch.device(config["model"]["device"])
+        device_ids = None
+    
     dtype_map = {
         "bfloat16": torch.bfloat16,
         "float16": torch.float16,
@@ -198,11 +213,24 @@ def main(config_path: str):
     )
 
     model = Transformer.from_pretrained(pretrained_model_path, device=device).train()
+    
+    # 多 GPU 支持：使用 DataParallel
+    if use_multi_gpu and len(device_ids) > 1:
+        model = torch.nn.DataParallel(model, device_ids=device_ids)
+        print(f"Model wrapped with DataParallel on {len(device_ids)} GPUs")
+        # DataParallel 的主模型在 device_ids[0] 上
+        actual_model = model.module
+    else:
+        actual_model = model
 
-    ref_model = deepcopy(model)
+    ref_model = deepcopy(actual_model)
     ref_model.eval()
     for p in ref_model.parameters():
-        p.requires_grad = False    
+        p.requires_grad = False
+    
+    # ref_model 也需要多 GPU 支持（如果启用）
+    if use_multi_gpu and len(device_ids) > 1:
+        ref_model = torch.nn.DataParallel(ref_model, device_ids=device_ids)    
 
     optimizer = MemoryEfficientAdamW(
         model.parameters(),
@@ -230,8 +258,10 @@ def main(config_path: str):
         for step_in_epoch, batch in enumerate(train_dataloader, start=1):
             global_step += 1
 
+            # rollout 使用实际模型（不是 DataParallel wrapper）
+            rollout_model = actual_model if use_multi_gpu and len(device_ids) > 1 else model
             episodes = rollout(
-                model=model,
+                model=rollout_model,
                 tokenizer=tokenizer,
                 batch=batch,
                 max_gen_len=config["training"]["max_gen_len"],
@@ -267,6 +297,10 @@ def main(config_path: str):
                 clip_ratio=config["training"].get("clip_ratio", 0.2),
                 enable_prefix=config["training"].get("enable_prefix", False),
                 prefix_sft_coeff=config["training"].get("prefix_sft_coeff", 0.2),
+                use_difficulty_aware_scaling=config["training"].get("use_difficulty_aware_scaling", False),
+                num_answer_per_question=NUM_ANSWERS_PER_QUESTION,
+                difficulty_weight_min=config["training"].get("difficulty_weight_min", 0.5),
+                difficulty_weight_max=config["training"].get("difficulty_weight_max", 2.0),
             )
 
             torch.cuda.synchronize()
@@ -311,7 +345,9 @@ def main(config_path: str):
 
             # Eval 按 global_step 触发
             if global_step % config["training"]["eval_interval"] == 0:
-                eval_success_rate, eval_mean_len = evaluate(model, tokenizer, device, dtype, config, global_step, current_time, safe_run_name)
+                # evaluate 使用实际模型
+                eval_model = actual_model if use_multi_gpu and len(device_ids) > 1 else model
+                eval_success_rate, eval_mean_len = evaluate(eval_model, tokenizer, device, dtype, config, global_step, current_time, safe_run_name)
                 print(f"\rEval success rate: {eval_success_rate:.2f}, Eval mean len: {eval_mean_len:.2f}" + " " * 100)
                 tb_writer.add_scalar("success_rate/eval", eval_success_rate, global_step)
                 tb_writer.add_scalar("mean_response_len/eval", eval_mean_len, global_step)

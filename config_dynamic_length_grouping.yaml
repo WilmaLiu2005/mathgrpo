@@ -1,5 +1,5 @@
 model:
-  pretrained_model_path: "/home/student008/GRPO-zero/Qwen2.5-3B-base/models--Qwen--Qwen2.5-3B/snapshots/3aab1f1954e9cc14eb9509a215f9e5ca08227a9b"
+  pretrained_model_path: "/home/student008/GRPO-zero/Qwen2.5-7B"
   device: "cuda:5"
   dtype: "bfloat16"
 
@@ -19,7 +19,7 @@ training:
   temperature: 0.9            # 采样温度，控制随机性（1.0=标准采样，>1.0=更随机，<1.0=更确定）
 
   batch_size: 128
-  num_questions_per_batch: 32
+  num_questions_per_batch: 4
 
   micro_batch_size: 8
   max_grad_norm: 1.0
@@ -73,7 +73,7 @@ wandb:
   enable: true
   project: mathgrpo
   entity: amdyes   # 可选
-  run_name: "dynamic_length_grouping_1226"                    # 为空则用时间戳
+  run_name: "7B-dynamic-length-grouping-0113"                    # 为空则用时间戳
   mode: online                    # 或 offline/disabled
   watch_model: false              # 是否记录梯度/参数直方图
   watch_log_freq: 100

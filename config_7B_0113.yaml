@@ -1,7 +1,11 @@
 model:
-  pretrained_model_path: "/home/student008/GRPO-zero/Qwen2.5-3B-base/models--Qwen--Qwen2.5-3B/snapshots/3aab1f1954e9cc14eb9509a215f9e5ca08227a9b"
-  device: "cuda:4"
+  pretrained_model_path: "/home/student008/GRPO-zero/Qwen2.5-7B"
+  device: "cuda"
   dtype: "bfloat16"
+  use_multi_gpu: true            # 是否使用多 GPU 训练（true=启用，false=单 GPU）
+  device_ids: [0, 1, 2, 3]        # 使用的 GPU 设备 ID 列表（仅在 use_multi_gpu=true 时生效）
+                                   # 如果不指定，将使用所有可用 GPU
+
 
 data:
   path: "gsm8k"          # ← 你的 GSM8K 数据存放目录
@@ -35,7 +39,7 @@ training:
   ckpt_save_interval: 100
   eval_interval: 50
 
-  memory_efficient_adamw: false
+  memory_efficient_adamw: true
 
   num_epochs: 2        # 训练轮数（跑完整个数据集的次数）。不设则默认 1
   max_steps: null      # 限制总步数（全局 step 计数）。例如 2000；设为 null/0/不写表示不限制
@@ -81,7 +85,7 @@ wandb:
   enable: true
   project: mathgrpo
   entity: amdyes   # 可选
-  run_name: "lqr-difficulty-scaling-0113"                    # 为空则用时间戳
+  run_name: "7B-0113"                    # 为空则用时间戳
   mode: online                    # 或 offline/disabled
   watch_model: false              # 是否记录梯度/参数直方图
   watch_log_freq: 100
