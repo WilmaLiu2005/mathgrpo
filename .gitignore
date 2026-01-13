@@ -180,5 +180,7 @@ Qwen2.5-3B-base/
 ckpt/
 logs/
 wandb/
+Qwen2.5-7B/
 
+eval_results/
 .vscode/
