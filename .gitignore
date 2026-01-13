@@ -183,4 +183,5 @@ wandb/
 Qwen2.5-7B/
 
 eval_results/
+prefixes.json
 .vscode/
