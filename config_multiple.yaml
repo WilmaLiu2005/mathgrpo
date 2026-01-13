@@ -1,6 +1,6 @@
 model:
   pretrained_model_path: "/home/student008/GRPO-zero/Qwen2.5-3B-base/models--Qwen--Qwen2.5-3B/snapshots/3aab1f1954e9cc14eb9509a215f9e5ca08227a9b"
-  device: "cuda:2"
+  device: "cuda:0"
   dtype: "bfloat16"
 
 data:
@@ -13,15 +13,15 @@ training:
 
   # GSM8K 题目较长，把 prompt 长度稍微调大
   max_prompt_len: 512
-  max_gen_len: 1024
+  max_gen_len: 512            # 减小生成长度，降低内存占用（从1024降到512，prefix模式下内存压力大）
   
   # 采样参数
-  temperature: 0.9            # 采样温度，控制随机性（1.0=标准采样，>1.0=更随机，<1.0=更确定）
+  temperature: 0.7            # 采样温度，控制随机性（1.0=标准采样，>1.0=更随机，<1.0=更确定）
 
-  batch_size: 128
-  num_questions_per_batch: 32
+  batch_size: 64              # 减小 batch size，降低内存占用（从128降到64）
+  num_questions_per_batch: 16  # 相应减小每个batch的问题数（从32降到16）
 
-  micro_batch_size: 8
+  micro_batch_size: 4         # 减小 micro batch size，进一步降低内存峰值（从8降到4）
   max_grad_norm: 1.0
   learning_rate: 1.0e-5
   weight_decay: 0.0
@@ -35,7 +35,7 @@ training:
   ckpt_save_interval: 100
   eval_interval: 10
 
-  memory_efficient_adamw: false
+  memory_efficient_adamw: true  # 启用内存高效的 AdamW，减少优化器状态的内存占用
 
   num_epochs: 3        # 训练轮数（跑完整个数据集的次数）。不设则默认 1
   max_steps: null      # 限制总步数（全局 step 计数）。例如 2000；设为 null/0/不写表示不限制
@@ -50,8 +50,8 @@ training:
   clip_ratio: 0.2               # PPO-style 固定 clip ratio（0.0=不使用裁剪，0.2 表示 [0.8, 1.2]）
   
   # KL 散度正则化参数
-  use_kl_penalty: true         # 是否使用 KL 散度正则化
-  kl_coeff: 0.02          # KL 散度正则项系数（仅在 use_kl_penalty=true 时生效）
+  use_kl_penalty: false         # 是否使用 KL 散度正则化
+  kl_coeff: 0.01               # 降低 KL 系数，减少计算量（从0.02降到0.01）
   
   # Reward 归一化参数
   use_length_grouping: true     # 是否使用长度分组进行 reward 归一化
@@ -74,7 +74,7 @@ wandb:
   enable: true
   project: mathgrpo
   entity: amdyes   # 可选
-  run_name: "multiple_1230"                    # 为空则用时间戳
+  run_name: "multiple_wo_kl_1231"                    # 为空则用时间戳
   mode: online                    # 或 offline/disabled
   watch_model: false              # 是否记录梯度/参数直方图
   watch_log_freq: 100

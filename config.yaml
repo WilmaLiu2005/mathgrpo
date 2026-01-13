@@ -19,7 +19,7 @@ training:
   temperature: 0.9            # 采样温度，控制随机性（1.0=标准采样，>1.0=更随机，<1.0=更确定）
 
   batch_size: 128
-  num_questions_per_batch: 32
+  num_questions_per_batch: 4
 
   micro_batch_size: 8
   max_grad_norm: 1.0
@@ -33,11 +33,11 @@ training:
 
   skip_unfinished_episodes: false
   ckpt_save_interval: 100
-  eval_interval: 10
+  eval_interval: 50
 
   memory_efficient_adamw: false
 
-  num_epochs: 3        # 训练轮数（跑完整个数据集的次数）。不设则默认 1
+  num_epochs: 2        # 训练轮数（跑完整个数据集的次数）。不设则默认 1
   max_steps: null      # 限制总步数（全局 step 计数）。例如 2000；设为 null/0/不写表示不限制
 
   # GRPO 算法相关配置
@@ -73,7 +73,7 @@ wandb:
   enable: true
   project: mathgrpo
   entity: amdyes   # 可选
-  run_name: "final_baseline_1226"                    # 为空则用时间戳
+  run_name: "final_baseline_0101"                    # 为空则用时间戳
   mode: online                    # 或 offline/disabled
   watch_model: false              # 是否记录梯度/参数直方图
   watch_log_freq: 100

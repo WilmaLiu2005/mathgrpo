@@ -1,6 +1,6 @@
 model:
   pretrained_model_path: "/home/student008/GRPO-zero/Qwen2.5-3B-base/models--Qwen--Qwen2.5-3B/snapshots/3aab1f1954e9cc14eb9509a215f9e5ca08227a9b"
-  device: "cuda:3"
+  device: "cuda:5"
   dtype: "bfloat16"
 
 data:
@@ -16,15 +16,15 @@ training:
   max_gen_len: 1024
   
   # 采样参数
-  temperature: 0.9            # 采样温度，控制随机性（1.0=标准采样，>1.0=更随机，<1.0=更确定）
+  temperature: 0.9            # 降低采样温度，减少随机性，提高稳定性（从0.9降到0.7）
 
   batch_size: 128
   num_questions_per_batch: 4
 
   micro_batch_size: 8
-  max_grad_norm: 1.0
-  learning_rate: 1.0e-5
-  weight_decay: 0.0
+  max_grad_norm: 1.0              # 降低梯度裁剪阈值，防止梯度爆炸（从1.0降到0.5）
+  learning_rate: 1.0e-5          # 降低学习率，提高稳定性（从1.0e-5降到5.0e-6）
+  weight_decay: 0.0           # 添加权重衰减，防止过拟合（从0.0增加到1.0e-4）
   betas: [0.9, 0.999]
 
   ckpt_dir: "ckpt"
@@ -47,21 +47,20 @@ training:
   epsilon_high: 0.3             # Dynamic clipping 上界参数
   
   # 固定值 Clipping 参数（当 use_dynamic_clipping=false 时使用）
-  clip_ratio: 0.2               # PPO-style 固定 clip ratio（0.0=不使用裁剪，0.2 表示 [0.8, 1.2]）
+  clip_ratio: 0.2              # 降低 clip ratio，更保守的更新（从0.2降到0.15，表示[0.85, 1.15]）
   
   # KL 散度正则化参数
-  use_kl_penalty: false         # 是否使用 KL 散度正则化
-  kl_coeff: 0.02          # KL 散度正则项系数（仅在 use_kl_penalty=true 时生效）
+  use_kl_penalty: false          # 启用 KL 惩罚，防止策略偏离原始模型太远（从false改为true）
+  kl_coeff: 0.02                # KL 散度正则项系数，从0.02降到0.01，更温和的约束
   
   # Reward 归一化参数
-  use_length_grouping: false     # 是否使用长度分组进行 reward 归一化
+  use_length_grouping: true     # 是否使用长度分组进行 reward 归一化
   
   # Prefix 训练模式配置
-  enable_prefix: true            # 是否启用 prefix 训练模式
+  enable_prefix: false            # 是否启用 prefix 训练模式
   prefix_file: "/data/liuxinyu/prefixes.json"              # Prefix 文件路径（JSON格式，由 generate_prefixes.py 生成）
                                  # 如果为 null，则训练时不会使用预生成的 prefix
   prefix_dropout_prob: 1.0       # Prefix dropout 概率（使用 DeepSeek 的概率，否则用 3B 采样）
-  prefix_use_prob: 1.0           # 训练时使用prefix的概率（用于与eval分布一致，0.5表示50%使用prefix，50%不使用）
   prefix_sft_coeff: 0.2          # Prefix-SFT loss 系数（推荐 0.1-0.3）
   prefix_teacher_model: "deepseek/deepseek-v3.2"  # Teacher 模型（OpenRouter）
   # 注意：prefix 只按两句话截断，不限制 token 数量
@@ -74,7 +73,7 @@ wandb:
   enable: true
   project: mathgrpo
   entity: amdyes   # 可选
-  run_name: "deepseek_prefix_0101"                    # 为空则用时间戳
+  run_name: "dynamic_length_new_group_0102"                    # 为空则用时间戳
   mode: online                    # 或 offline/disabled
   watch_model: false              # 是否记录梯度/参数直方图
   watch_log_freq: 100

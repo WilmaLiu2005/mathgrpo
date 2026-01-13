@@ -1,6 +1,6 @@
 model:
   pretrained_model_path: "/home/student008/GRPO-zero/Qwen2.5-3B-base/models--Qwen--Qwen2.5-3B/snapshots/3aab1f1954e9cc14eb9509a215f9e5ca08227a9b"
-  device: "cuda:5"
+  device: "cuda:6"
   dtype: "bfloat16"
 
 data:
@@ -16,15 +16,15 @@ training:
   max_gen_len: 1024
   
   # 采样参数
-  temperature: 0.9            # 采样温度，控制随机性（1.0=标准采样，>1.0=更随机，<1.0=更确定）
+  temperature: 0.9            # 降低采样温度，减少随机性，提高稳定性（从0.9降到0.7）
 
   batch_size: 128
-  num_questions_per_batch: 32
+  num_questions_per_batch: 4
 
   micro_batch_size: 8
-  max_grad_norm: 1.0
-  learning_rate: 1.0e-5
-  weight_decay: 0.0
+  max_grad_norm: 1.0              # 降低梯度裁剪阈值，防止梯度爆炸（从1.0降到0.5）
+  learning_rate: 1.0e-5          # 降低学习率，提高稳定性（从1.0e-5降到5.0e-6）
+  weight_decay: 0.0           # 添加权重衰减，防止过拟合（从0.0增加到1.0e-4）
   betas: [0.9, 0.999]
 
   ckpt_dir: "ckpt"
@@ -33,11 +33,11 @@ training:
 
   skip_unfinished_episodes: false
   ckpt_save_interval: 100
-  eval_interval: 10
+  eval_interval: 50
 
   memory_efficient_adamw: false
 
-  num_epochs: 3        # 训练轮数（跑完整个数据集的次数）。不设则默认 1
+  num_epochs: 2        # 训练轮数（跑完整个数据集的次数）。不设则默认 1
   max_steps: null      # 限制总步数（全局 step 计数）。例如 2000；设为 null/0/不写表示不限制
 
   # GRPO 算法相关配置
@@ -47,11 +47,11 @@ training:
   epsilon_high: 0.3             # Dynamic clipping 上界参数
   
   # 固定值 Clipping 参数（当 use_dynamic_clipping=false 时使用）
-  clip_ratio: 0.2               # PPO-style 固定 clip ratio（0.0=不使用裁剪，0.2 表示 [0.8, 1.2]）
+  clip_ratio: 0.2              # 降低 clip ratio，更保守的更新（从0.2降到0.15，表示[0.85, 1.15]）
   
   # KL 散度正则化参数
-  use_kl_penalty: false         # 是否使用 KL 散度正则化
-  kl_coeff: 0.02          # KL 散度正则项系数（仅在 use_kl_penalty=true 时生效）
+  use_kl_penalty: false          # 启用 KL 惩罚，防止策略偏离原始模型太远（从false改为true）
+  kl_coeff: 0.02                # KL 散度正则项系数，从0.02降到0.01，更温和的约束
   
   # Reward 归一化参数
   use_length_grouping: true     # 是否使用长度分组进行 reward 归一化
@@ -73,7 +73,7 @@ wandb:
   enable: true
   project: mathgrpo
   entity: amdyes   # 可选
-  run_name: "dynamic_length_grouping_1226"                    # 为空则用时间戳
+  run_name: "dynamic_length_grouping_without_kl_0101"                    # 为空则用时间戳
   mode: online                    # 或 offline/disabled
   watch_model: false              # 是否记录梯度/参数直方图
   watch_log_freq: 100

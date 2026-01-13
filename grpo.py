@@ -379,6 +379,35 @@ def update_policy(
         clip_ratio: Fixed clip ratio for PPO-style clipping (when use_dynamic_clipping=False)
     """
     episodes = normalize_rewards_per_group(episodes, use_length_grouping=use_length_grouping)
+    
+    # If using length grouping, assign length buckets to episodes
+    if use_length_grouping:
+        lengths = [len(episode.generated_token_ids) for episode in episodes]
+        if len(lengths) > 0:
+            mean_length = np.mean(lengths)
+            std_length = np.std(lengths)
+            if std_length < 1e-6:
+                std_length = 1.0
+            lower_bound = mean_length - std_length
+            upper_bound = mean_length + std_length
+            
+            for episode in episodes:
+                length = len(episode.generated_token_ids)
+                if length < lower_bound:
+                    episode.length_bucket = "short"
+                elif length <= upper_bound:
+                    episode.length_bucket = "medium"
+                else:
+                    episode.length_bucket = "long"
+        else:
+            # Fallback: all episodes in medium group
+            for episode in episodes:
+                episode.length_bucket = "medium"
+    else:
+        # Not using length grouping, assign all to a single group
+        for episode in episodes:
+            episode.length_bucket = "all"
+    
     # sort episodes by token length for efficient (micro-)batching
     episodes.sort(key=lambda x: len(x.prefix_token_ids) + len(x.generated_token_ids))
     num_micro_batches = math.ceil(len(episodes) / micro_batch_size)
@@ -393,6 +422,7 @@ def update_policy(
         "ratio_sum": 0.0,
         "clipped_ratio_sum": 0.0,
     }
+    
 
     for i in range(0, len(episodes), micro_batch_size):
         print(
@@ -601,15 +631,58 @@ def update_policy(
 
         # Step 8: 总 Loss
         # GRPO loss（只对 continuation）
-        grpo_loss = -(obj.sum() / num_target_tokens)
-        
-        # 总 loss = prefix-SFT loss + GRPO loss + KL loss
-        loss = prefix_sft_coeff * prefix_sft_loss + grpo_loss
-        
-        # Add KL penalty if enabled
-        if use_kl_penalty:
-            loss += kl_coeff * kl_loss
-        loss.backward()
+        if use_length_grouping:
+            # For length grouping: compute loss per group within this batch, then average across groups
+            # First, compute per-episode obj sums and token counts
+            batch_obj_sum = obj.sum(dim=1)  # Sum over tokens for each episode in batch: (batch_size,)
+            batch_token_counts = target_continuation_masks.sum(dim=1)  # Token count per episode: (batch_size,)
+            
+            # Group episodes by length bucket
+            batch_group_obj_sums = {"short": [], "medium": [], "long": []}
+            batch_group_token_counts = {"short": [], "medium": [], "long": []}
+            
+            for ep_idx, episode in enumerate(batch_episodes):
+                bucket = episode.length_bucket
+                if bucket in batch_group_obj_sums:
+                    batch_group_obj_sums[bucket].append(batch_obj_sum[ep_idx])
+                    batch_group_token_counts[bucket].append(batch_token_counts[ep_idx])
+            
+            # Compute average loss per group for this batch
+            group_losses_batch = []
+            for bucket in ["short", "medium", "long"]:
+                if len(batch_group_obj_sums[bucket]) > 0:
+                    # Sum obj values and token counts for this group in this batch
+                    group_obj_sum = sum(batch_group_obj_sums[bucket])
+                    group_token_count = sum(batch_group_token_counts[bucket])
+                    if group_token_count > 0:
+                        # Average loss for this group: -sum(obj) / token_count
+                        group_loss = -group_obj_sum / group_token_count
+                        group_losses_batch.append(group_loss)
+            
+            # Average across groups (each group has equal weight)
+            if len(group_losses_batch) > 0:
+                grpo_loss = sum(group_losses_batch) / len(group_losses_batch)
+            else:
+                grpo_loss = torch.tensor(0.0, device=device)
+            
+            # 总 loss = prefix-SFT loss + GRPO loss + KL loss
+            loss = prefix_sft_coeff * prefix_sft_loss + grpo_loss
+            
+            # Add KL penalty if enabled
+            if use_kl_penalty:
+                loss += kl_coeff * kl_loss
+            loss.backward()
+        else:
+            # Standard global averaging
+            grpo_loss = -(obj.sum() / num_target_tokens)
+            
+            # 总 loss = prefix-SFT loss + GRPO loss + KL loss
+            loss = prefix_sft_coeff * prefix_sft_loss + grpo_loss
+            
+            # Add KL penalty if enabled
+            if use_kl_penalty:
+                loss += kl_coeff * kl_loss
+            loss.backward()
 
     # update the policy
     grad_norm = torch.nn.utils.clip_grad_norm_(
