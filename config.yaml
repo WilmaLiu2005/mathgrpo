@@ -1,10 +1,10 @@
 model:
-  pretrained_model_path: "/home/student008/GRPO-zero/Qwen2.5-3B-base/models--Qwen--Qwen2.5-3B/snapshots/3aab1f1954e9cc14eb9509a215f9e5ca08227a9b"
+  pretrained_model_path: "/path/to/models--Qwen--Qwen2.5-3B/"
   device: "cuda:4"
   dtype: "bfloat16"
 
 data:
-  path: "gsm8k"          # ← 你的 GSM8K 数据存放目录
+  path: "/path/to/gsm8k"          # ← 你的 GSM8K 数据存放目录
   config_name: "main"    # ← 可选: "main" 或 "socratic"
   test_size: 128
 
@@ -42,19 +42,27 @@ training:
 
   # GRPO 算法相关配置
   # Dynamic Clipping 参数
-  use_dynamic_clipping: false   # 是否使用 dynamic clipping（true=动态裁剪，false=固定裁剪PPO风格）
+  use_dynamic_clipping: true   # 是否使用 dynamic clipping（true=动态裁剪，false=固定裁剪PPO风格）
   epsilon_low: 0.3              # Dynamic clipping 下界参数
   epsilon_high: 0.3             # Dynamic clipping 上界参数
   
   # 固定值 Clipping 参数（当 use_dynamic_clipping=false 时使用）
   clip_ratio: 0.2               # PPO-style 固定 clip ratio（0.0=不使用裁剪，0.2 表示 [0.8, 1.2]）
+
+  # 优势缩放开关
+  use_difficulty_aware_advantage: true   # 是否使用跨组难度感知优势缩放
+
+  # 相似度奖励开关 (Similarity-weighted Reward)
+  use_similarity_weighting: true        # 是否使用基于隐空间相似度的奖励重加权
+  similarity_weighting_alpha: 0.1        # 混合系数 (1-alpha)*r + alpha*weighted_baseline
+  similarity_weighting_tau: 1.0          # Softmax 温度
   
   # KL 散度正则化参数
   use_kl_penalty: false         # 是否使用 KL 散度正则化
   kl_coeff: 0.02          # KL 散度正则项系数（仅在 use_kl_penalty=true 时生效）
   
   # Reward 归一化参数
-  use_length_grouping: false     # 是否使用长度分组进行 reward 归一化
+  use_length_grouping: true     # 是否使用长度分组进行 reward 归一化
   
   # Prefix 训练模式配置
   enable_prefix: false            # 是否启用 prefix 训练模式

@@ -199,10 +199,13 @@ def main(config_path: str):
 
     model = Transformer.from_pretrained(pretrained_model_path, device=device).train()
 
-    ref_model = deepcopy(model)
-    ref_model.eval()
-    for p in ref_model.parameters():
-        p.requires_grad = False    
+    if config["training"].get("use_kl_penalty", False):
+        ref_model = deepcopy(model) 
+        ref_model.eval()
+        for p in ref_model.parameters():
+            p.requires_grad = False
+    else:
+        ref_model = None
 
     optimizer = MemoryEfficientAdamW(
         model.parameters(),
@@ -267,6 +270,14 @@ def main(config_path: str):
                 clip_ratio=config["training"].get("clip_ratio", 0.2),
                 enable_prefix=config["training"].get("enable_prefix", False),
                 prefix_sft_coeff=config["training"].get("prefix_sft_coeff", 0.2),
+                use_difficulty_aware_advantage=config["training"].get("use_difficulty_aware_advantage", False),
+                use_similarity_weighting=config["training"].get("use_similarity_weighting", False),
+                similarity_kwargs={
+                    "tau": config["training"].get("similarity_weighting_tau", 1.0),
+                    "alpha": config["training"].get("similarity_weighting_alpha", 0.1),
+                    "device": device,
+                    "dtype": dtype,
+                },
             )
 
             torch.cuda.synchronize()
