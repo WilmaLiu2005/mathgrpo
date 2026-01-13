@@ -1,10 +1,10 @@
 model:
-  pretrained_model_path: "/home/student008/GRPO-zero/Qwen2.5-3B-base/models--Qwen--Qwen2.5-3B/snapshots/3aab1f1954e9cc14eb9509a215f9e5ca08227a9b"
-  device: "cuda:1"
+  pretrained_model_path: "/path/to/models--Qwen--Qwen2.5-3B/"
+  device: "cuda:4"
   dtype: "bfloat16"
 
 data:
-  path: "gsm8k"          # ← 你的 GSM8K 数据存放目录
+  path: "/path/to/gsm8k"          # ← 你的 GSM8K 数据存放目录
   config_name: "main"    # ← 可选: "main" 或 "socratic"
   test_size: 128
 
@@ -19,7 +19,7 @@ training:
   temperature: 0.9            # 采样温度，控制随机性（1.0=标准采样，>1.0=更随机，<1.0=更确定）
 
   batch_size: 128
-  num_questions_per_batch: 32
+  num_questions_per_batch: 4
 
   micro_batch_size: 8
   max_grad_norm: 1.0
@@ -33,28 +33,36 @@ training:
 
   skip_unfinished_episodes: false
   ckpt_save_interval: 100
-  eval_interval: 10
+  eval_interval: 50
 
   memory_efficient_adamw: false
 
-  num_epochs: 3        # 训练轮数（跑完整个数据集的次数）。不设则默认 1
+  num_epochs: 2        # 训练轮数（跑完整个数据集的次数）。不设则默认 1
   max_steps: null      # 限制总步数（全局 step 计数）。例如 2000；设为 null/0/不写表示不限制
 
   # GRPO 算法相关配置
   # Dynamic Clipping 参数
-  use_dynamic_clipping: false   # 是否使用 dynamic clipping（true=动态裁剪，false=固定裁剪PPO风格）
+  use_dynamic_clipping: true   # 是否使用 dynamic clipping（true=动态裁剪，false=固定裁剪PPO风格）
   epsilon_low: 0.3              # Dynamic clipping 下界参数
   epsilon_high: 0.3             # Dynamic clipping 上界参数
   
   # 固定值 Clipping 参数（当 use_dynamic_clipping=false 时使用）
   clip_ratio: 0.2               # PPO-style 固定 clip ratio（0.0=不使用裁剪，0.2 表示 [0.8, 1.2]）
+
+  # 优势缩放开关
+  use_difficulty_aware_advantage: true   # 是否使用跨组难度感知优势缩放
+
+  # 相似度奖励开关 (Similarity-weighted Reward)
+  use_similarity_weighting: true        # 是否使用基于隐空间相似度的奖励重加权
+  similarity_weighting_alpha: 0.1        # 混合系数 (1-alpha)*r + alpha*weighted_baseline
+  similarity_weighting_tau: 1.0          # Softmax 温度
   
   # KL 散度正则化参数
   use_kl_penalty: false         # 是否使用 KL 散度正则化
   kl_coeff: 0.02          # KL 散度正则项系数（仅在 use_kl_penalty=true 时生效）
   
   # Reward 归一化参数
-  use_length_grouping: false     # 是否使用长度分组进行 reward 归一化
+  use_length_grouping: true     # 是否使用长度分组进行 reward 归一化
   
   # Prefix 训练模式配置
   enable_prefix: false            # 是否启用 prefix 训练模式
@@ -73,7 +81,7 @@ wandb:
   enable: true
   project: mathgrpo
   entity: amdyes   # 可选
-  run_name: "final_baseline_1226"                    # 为空则用时间戳
+  run_name: "final_baseline_0101"                    # 为空则用时间戳
   mode: online                    # 或 offline/disabled
   watch_model: false              # 是否记录梯度/参数直方图
   watch_log_freq: 100

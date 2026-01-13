@@ -27,6 +27,7 @@ def rollout(
     temperature: float = 1.0,
     enable_prefix: bool = False,
     prefix_dropout_prob: float = 0.5,
+    prefix_use_prob: float = 1.0,  # 训练时使用prefix的概率（用于与eval分布一致）
 ) -> List[Episode]:
     end_token = tokenizer.eos_token
     end_token_id = tokenizer.eos_token_id
@@ -35,10 +36,29 @@ def rollout(
     # Step 1: Prefix 采样（如果启用）
     prefix_info_list = []  # 存储每个问题的 prefix 信息
     if enable_prefix:
+        # 调试信息：检查 batch 是否有 prefix_data
+        if not hasattr(batch, 'prefix_data'):
+            print(f"Warning: batch has no 'prefix_data' attribute, prefix mode disabled for this batch")
+        elif not batch.prefix_data:
+            print(f"Warning: batch.prefix_data is empty, prefix mode disabled for this batch")
+        
         for i, question in enumerate(batch.questions):
             prefix_data = batch.prefix_data[i] if hasattr(batch, 'prefix_data') and i < len(batch.prefix_data) else None
             
-            if prefix_data and (prefix_data.get("deepseek_prefixes") or prefix_data.get("3b_prefixes")):
+            # 决定是否使用prefix（用于与eval分布一致）
+            # prefix_use_prob=1.0 表示总是使用prefix（如果可用）
+            # prefix_use_prob=0.5 表示50%的概率使用prefix，50%的概率不使用（模拟eval时的无prefix情况）
+            has_prefix_data = prefix_data and (prefix_data.get("deepseek_prefixes") or prefix_data.get("3b_prefixes"))
+            if has_prefix_data:
+                use_prefix_this_sample = random.random() < prefix_use_prob
+            else:
+                use_prefix_this_sample = False
+            
+            # 调试信息（只打印前几个样本）
+            # if i < 3 and enable_prefix:
+                # print(f"Sample {i}: has_prefix_data={has_prefix_data}, prefix_use_prob={prefix_use_prob}, use_prefix_this_sample={use_prefix_this_sample}")
+            
+            if use_prefix_this_sample:
                 # 从预生成的 prefix 中随机选择
                 use_deepseek = random.random() < prefix_dropout_prob
                 
@@ -93,7 +113,7 @@ def rollout(
                         prefix_source = "none"
                         prefix_old_log_probs = []
             else:
-                # 如果没有预生成的 prefix 数据，使用空 prefix
+                # 不使用prefix（可能是prefix_data为None，或者被prefix_use_prob随机dropout）
                 prefix_text = ""
                 prefix_token_ids = []
                 prefix_tokens = []
@@ -310,7 +330,7 @@ def get_rewards_from_episodes(
 
     return adjusted_rewards.tolist()
 
-def normalize_rewards_per_group(episodes: List[Episode], use_length_grouping: bool = False, process_reward_kwargs: dict = dict()) -> List[Episode]:
+def normalize_rewards_per_group(episodes: List[Episode], use_length_grouping: bool = False, process_reward_kwargs: dict = dict(), use_difficulty_aware_advantage: bool = False,) -> List[Episode]:
     """Normalize rewards per group. A group is defined by the prefix (and optionally response length bucket)."""
     groups = defaultdict(list[Episode])
     
@@ -343,14 +363,55 @@ def normalize_rewards_per_group(episodes: List[Episode], use_length_grouping: bo
         groups[key].append(episode)
         
     output = []
-    for group in groups.values():
-        group_rewards = get_rewards_from_episodes(group, **process_reward_kwargs)
-        mean_reward = np.mean(group_rewards)
-        std_reward = np.std(group_rewards)
-        for episode in group:
-            normalized_reward = (episode.reward - mean_reward) / (std_reward + 1e-4)
-            episode = dataclasses.replace(episode, reward=normalized_reward)
-            output.append(episode)
+    
+    if use_difficulty_aware_advantage:
+        # Cross-prompt difficulty awareness:
+        # 1. Compute group means to estimate task difficulty relative to the current batch
+        group_stats = []
+        for group in groups.values():
+            # Apply similarity weighting if enabled
+            group_rewards = get_rewards_from_episodes(
+                group, 
+                **process_reward_kwargs
+            )
+            m = np.mean(group_rewards)
+            group_stats.append(m)
+        batch_mean_reward = np.mean(group_stats) if group_stats else 0.0
+
+        for group in groups.values():
+            group_rewards = get_rewards_from_episodes(
+                group, 
+                **process_reward_kwargs
+            )
+            mean_reward = np.mean(group_rewards)
+            std_reward = np.std(group_rewards)
+
+            # 2. Difficulty Scaling Factor: 
+            # Harder questions (lower mean_reward than batch average) get higher weights
+            difficulty_weight = 1.0 + (batch_mean_reward - mean_reward)
+            # Clip to maintain training stability (e.g., 0.5 to 2.0x weight)
+            difficulty_weight = np.clip(difficulty_weight, 0.5, 2.0)
+
+            for idx, episode in enumerate(group):
+                normalized_reward = (group_rewards[idx] - mean_reward) / (std_reward + 1e-4)
+                # 3. Apply the cross-group scaling to the advantage
+                weighted_reward = normalized_reward * difficulty_weight
+                episode = dataclasses.replace(episode, reward=weighted_reward)
+                output.append(episode)
+    else:
+        # Original logic (optionally with similarity weighting)
+        for group in groups.values():
+            group_rewards = get_rewards_from_episodes(
+                group, 
+                **process_reward_kwargs
+            )
+            mean_reward = np.mean(group_rewards)
+            std_reward = np.std(group_rewards)
+            for idx, episode in enumerate(group):
+                normalized_reward = (group_rewards[idx] - mean_reward) / (std_reward + 1e-4)
+                episode = dataclasses.replace(episode, reward=normalized_reward)
+                output.append(episode)
+                
     return output
 
 
@@ -390,6 +451,7 @@ def update_policy(
     enable_prefix: bool = False,
     prefix_sft_coeff: float = 0.2,
     process_reward_kwargs: dict = dict(),
+    use_difficulty_aware_advantage: bool = False,
 ):
     """Update the policy using the GRPO algorithm.
     
@@ -410,8 +472,11 @@ def update_policy(
         use_dynamic_clipping: Whether to use dynamic clipping
         use_kl_penalty: Whether to use KL penalty
         clip_ratio: Fixed clip ratio for PPO-style clipping (when use_dynamic_clipping=False)
+        use_difficulty_aware_advantage: Whether to use cross-group difficulty scaling
+        use_similarity_weighting: Whether to use similarity-based reward weighting
+        similarity_kwargs: Kwargs for similarity weighting
     """
-    episodes = normalize_rewards_per_group(episodes, use_length_grouping=use_length_grouping, process_reward_kwargs=process_reward_kwargs)
+    episodes = normalize_rewards_per_group(episodes, use_length_grouping=use_length_grouping, use_difficulty_aware_advantage=use_difficulty_aware_advantage, process_reward_kwargs=process_reward_kwargs)
     # sort episodes by token length for efficient (micro-)batching
     episodes.sort(key=lambda x: len(x.prefix_token_ids) + len(x.generated_token_ids))
     num_micro_batches = math.ceil(len(episodes) / micro_batch_size)
@@ -426,6 +491,7 @@ def update_policy(
         "ratio_sum": 0.0,
         "clipped_ratio_sum": 0.0,
     }
+    
 
     for i in range(0, len(episodes), micro_batch_size):
         print(
@@ -520,10 +586,11 @@ def update_policy(
             reduction="none",
         ).reshape(input_token_ids.shape[0], -1)
 
-        # Step 5: Prefix-SFT Loss（如果启用 prefix 模式）
+        # Step 5: Prefix-SFT Loss（如果启用 prefix 模式且有 prefix token）
         prefix_sft_loss = torch.tensor(0.0, device=device)
-        if enable_prefix and target_prefix_masks is not None:
+        if enable_prefix and target_prefix_masks is not None and num_prefix_tokens > 0:
             # 对 prefix token 计算 SFT loss（无论来源）
+            # 注意：当不使用prefix时（prefix_length=0），num_prefix_tokens=0，这里不会执行
             prefix_log_probs = log_probs * target_prefix_masks
             prefix_sft_loss = -prefix_log_probs.sum() / (num_prefix_tokens + 1e-8)
             prefix_sft_loss_total += prefix_sft_loss.item()
@@ -550,16 +617,16 @@ def update_policy(
         }
         
         # Step 6: Conditional GRPO Loss（只对 continuation token）
-        # 只对 continuation token 计算 ratio 和 advantage
-        continuation_log_probs = log_probs * target_continuation_masks
-        continuation_old_log_probs = old_log_probs * target_continuation_masks
+        # 使用原始 log_probs 和 old_log_probs 计算 ratio（不要先mask）
+        # 这样在 mask=0 的位置 ratio 也会有正确的值（虽然我们不会使用）
+        ratio = torch.exp(log_probs - old_log_probs)
         
         if use_dynamic_clipping:
             # Importance Sampling with Dynamic Adaptive Clipping（只对 continuation）
-            ratio = torch.exp(continuation_log_probs - continuation_old_log_probs)
-            q_x = torch.exp(continuation_old_log_probs)
+            # 使用原始 old_log_probs 计算 q_x（对所有位置）
+            q_x = torch.exp(old_log_probs)
             
-            # Dynamic bounds
+            # Dynamic bounds（对所有位置计算，但只在continuation位置使用）
             # L(x) = 0.5 + 0.5 * sqrt(max(1 - 4*eps_low/q(x), 0))
             val_low = 1 - 4 * epsilon_low / (q_x + 1e-10)
             val_low = torch.clamp(val_low, min=0.0)
@@ -571,8 +638,11 @@ def update_policy(
             
             # Track clipping statistics（只统计 continuation tokens）
             continuation_ratio = ratio * target_continuation_masks
-            clipped_lower = (continuation_ratio < lower_bound).sum().item()
-            clipped_upper = (continuation_ratio > upper_bound).sum().item()
+            # 只在continuation位置比较ratio和边界
+            continuation_lower_bound = lower_bound * target_continuation_masks
+            continuation_upper_bound = upper_bound * target_continuation_masks
+            clipped_lower = ((continuation_ratio < continuation_lower_bound) & target_continuation_masks).sum().item()
+            clipped_upper = ((continuation_ratio > continuation_upper_bound) & target_continuation_masks).sum().item()
             total_tokens = target_continuation_masks.sum().item()
             clip_stats = {
                 "clipped_lower": clipped_lower,
@@ -592,7 +662,7 @@ def update_policy(
         else:
             # PPO-style fixed clipping (only if clip_ratio > 0)
             if clip_ratio > 0.0:
-                ratio = torch.exp(continuation_log_probs - continuation_old_log_probs)
+                # ratio 已经在上面用原始 log_probs 和 old_log_probs 计算了
                 clip_lower = 1.0 - clip_ratio
                 clip_upper = 1.0 + clip_ratio
             
@@ -618,6 +688,7 @@ def update_policy(
                 obj = obj * target_continuation_masks
             else:
                 # No clipping: use original GRPO objective（只对 continuation）
+                continuation_log_probs = log_probs * target_continuation_masks
                 obj = continuation_log_probs * advantages
 
         # Accumulate clip statistics (both for dynamic and fixed clipping)
@@ -629,15 +700,58 @@ def update_policy(
 
         # Step 8: 总 Loss
         # GRPO loss（只对 continuation）
-        grpo_loss = -(obj.sum() / num_target_tokens)
-        
-        # 总 loss = prefix-SFT loss + GRPO loss + KL loss
-        loss = prefix_sft_coeff * prefix_sft_loss + grpo_loss
-        
-        # Add KL penalty if enabled
-        if use_kl_penalty:
-            loss += kl_coeff * kl_loss
-        loss.backward()
+        if use_length_grouping:
+            # For length grouping: compute loss per group within this batch, then average across groups
+            # First, compute per-episode obj sums and token counts
+            batch_obj_sum = obj.sum(dim=1)  # Sum over tokens for each episode in batch: (batch_size,)
+            batch_token_counts = target_continuation_masks.sum(dim=1)  # Token count per episode: (batch_size,)
+            
+            # Group episodes by length bucket
+            batch_group_obj_sums = {"short": [], "medium": [], "long": []}
+            batch_group_token_counts = {"short": [], "medium": [], "long": []}
+            
+            for ep_idx, episode in enumerate(batch_episodes):
+                bucket = episode.length_bucket
+                if bucket in batch_group_obj_sums:
+                    batch_group_obj_sums[bucket].append(batch_obj_sum[ep_idx])
+                    batch_group_token_counts[bucket].append(batch_token_counts[ep_idx])
+            
+            # Compute average loss per group for this batch
+            group_losses_batch = []
+            for bucket in ["short", "medium", "long"]:
+                if len(batch_group_obj_sums[bucket]) > 0:
+                    # Sum obj values and token counts for this group in this batch
+                    group_obj_sum = sum(batch_group_obj_sums[bucket])
+                    group_token_count = sum(batch_group_token_counts[bucket])
+                    if group_token_count > 0:
+                        # Average loss for this group: -sum(obj) / token_count
+                        group_loss = -group_obj_sum / group_token_count
+                        group_losses_batch.append(group_loss)
+            
+            # Average across groups (each group has equal weight)
+            if len(group_losses_batch) > 0:
+                grpo_loss = sum(group_losses_batch) / len(group_losses_batch)
+            else:
+                grpo_loss = torch.tensor(0.0, device=device)
+            
+            # 总 loss = prefix-SFT loss + GRPO loss + KL loss
+            loss = prefix_sft_coeff * prefix_sft_loss + grpo_loss
+            
+            # Add KL penalty if enabled
+            if use_kl_penalty:
+                loss += kl_coeff * kl_loss
+            loss.backward()
+        else:
+            # Standard global averaging
+            grpo_loss = -(obj.sum() / num_target_tokens)
+            
+            # 总 loss = prefix-SFT loss + GRPO loss + KL loss
+            loss = prefix_sft_coeff * prefix_sft_loss + grpo_loss
+            
+            # Add KL penalty if enabled
+            if use_kl_penalty:
+                loss += kl_coeff * kl_loss
+            loss.backward()
 
     # update the policy
     grad_norm = torch.nn.utils.clip_grad_norm_(

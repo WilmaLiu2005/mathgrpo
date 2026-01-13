@@ -181,6 +181,12 @@ class GSM8KDataset(Dataset):
             if q in self.prefix_map:
                 item["prefix_data"] = self.prefix_map[q]
             else:
+                # 调试信息：如果找不到对应的prefix，打印警告（只打印前几个）
+                if not hasattr(self, '_prefix_warn_count'):
+                    self._prefix_warn_count = 0
+                if self._prefix_warn_count < 3:
+                    print(f"Warning: Question not found in prefix_map: {q[:100]}...")
+                    self._prefix_warn_count += 1
                 item["prefix_data"] = None  # 如果没有找到对应的 prefix，设为 None
         
         return item

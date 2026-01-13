@@ -1,6 +1,6 @@
 model:
   pretrained_model_path: "/home/student008/GRPO-zero/Qwen2.5-3B-base/models--Qwen--Qwen2.5-3B/snapshots/3aab1f1954e9cc14eb9509a215f9e5ca08227a9b"
-  device: "cuda:6"
+  device: "cuda:5"
   dtype: "bfloat16"
 
 data:
@@ -73,7 +73,7 @@ wandb:
   enable: true
   project: mathgrpo
   entity: amdyes   # 可选
-  run_name: "dynamic_length_grouping_without_kl_0101"                    # 为空则用时间戳
+  run_name: "dynamic_length_new_group_0102"                    # 为空则用时间戳
   mode: online                    # 或 offline/disabled
   watch_model: false              # 是否记录梯度/参数直方图
   watch_log_freq: 100
