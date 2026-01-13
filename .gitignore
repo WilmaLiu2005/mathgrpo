@@ -177,6 +177,7 @@ gsm8k/
 Countdown-Tasks-3to4/
 Qwen2.5-3B-Instruct/
 Qwen2.5-3B-base/
+Qwen2.5-7B/
 ckpt/
 logs/
 wandb/
