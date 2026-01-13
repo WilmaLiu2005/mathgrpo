@@ -8,8 +8,27 @@ GRPO training with minimal dependencies (and low GPU memory usage!). We implemen
 * We support several improvements over the original GRPO algorithm from the [DAPO project](https://arxiv.org/abs/2503.14476), including:
 
   * **Token-level policy gradient loss**: every token is equally weighted in the policy gradient loss.
-  * **Removing KL Divergence**: the KL divergence is not used in the policy gradient loss. This reduces GPU memory usage as we no longer need the reference policy network.
-  * **Overlong episode filtering**: skips unfinished episodes that exceed context length limits. This stabilizes training. Though disabled by default to observe model learning under limited context length. Set `skip_unfinished_episodes` to `true` to enable it.
+  * **Removing KL Divergence**: the KL divergence is not used in the policy gradient loss by default. This reduces GPU memory usage as we no longer need the reference policy network.
+  * **Overlong episode filtering**: skips unfinished episodes that exceed context length limits. This stabilizes training. Set `skip_unfinished_episodes` to `true` to enable it.
+
+## Configuration Switches
+
+We provide several advanced switches in `config.yaml` to experiment with different training dynamics. Note that many are disabled by default and require being set to `true` to activate.
+
+### 1. Training Stability & Filtering
+* **`skip_unfinished_episodes`** (default: `false`): When set to `true`, episodes that do not reach the EOS token (e.g., due to length limits) are discarded. This helps prevent the model from learning to generate incomplete logic.
+
+### 2. Core Algorithm Enhancements
+* **`use_dynamic_clipping`** (default: `true`): Enables adaptive clipping bounds for the PPO objective, which adjust based on the old policy's probability density. If `false`, standard fixed PPO-style clipping (`clip_ratio`) is used.
+* **`use_kl_penalty`** (default: `false`): Enables standard KL divergence regularization against a reference model to prevent the policy from shifting too far from the base model.
+* **`use_length_grouping`** (default: `true`): If `true`, reward normalization happens within buckets of similar response lengths, preventing the model from disproportionately rewarding short or long answers simply because of their length.
+
+### 3. Reward & Advantage Innovation
+* **`use_difficulty_aware_advantage`** (default: `true`): Enables **Cross-prompt Difficulty Awareness**. It scales the advantage based on the relative difficulty of the question in the current batch. Harder questions (lower mean rewards) get higher gradient weights to prioritize learning "tougher" logic.
+* **`use_similarity_weighting`** (default: `true`): Enables **Semantic-based Reward Re-weighting**. Uses a small encoder (from the policy model itself) to compute hidden state similarities between responses in a group. It penalizes redundant responses to encourage diversity in the Reasoning Chain.
+
+### 4. Advanced Training Modes
+* **`enable_prefix`** (default: `false`): Enables **Prefix Training Mode**. This allows the model to load pre-generated reasoning "prefixes" (e.g., from DeepSeek or previous 3B runs) and applies an SFT-style loss on these segments to guide the model towards standard reasoning patterns.
 
 ## Algorithm 
 

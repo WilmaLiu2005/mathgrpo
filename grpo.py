@@ -7,6 +7,7 @@ from typing import Callable, List, Optional
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from data_types import Episode, MiniBatch
 from qwen2_model import Transformer
@@ -278,7 +279,67 @@ def rollout(
     return episodes
 
 
-def normalize_rewards_per_group(episodes: List[Episode], use_length_grouping: bool = False) -> List[Episode]:
+def get_rewards_from_episodes(
+    episodes: List[Episode], 
+    use_similarity_weighting: bool = False, 
+    model: Transformer = None, 
+    pad_token_id: int = 0,
+    dtype = torch.float32, 
+    device = "cuda",
+    tau = 1.0,
+    alpha = 0.1,
+    fix_model = True,
+) -> List[float]:
+    if not use_similarity_weighting:
+        return [episode.reward for episode in episodes]
+    assert model is not None, "model should not be None if use_similarity_weighting is True"
+
+    model.eval()
+
+    rewards = torch.tensor(
+        [episode.reward for episode in episodes],
+        dtype=dtype,
+        device=device
+    )  # (N,)
+
+    responses = [episode.generated_token_ids for episode in episodes]
+    hidden_states = []
+    for response in responses:
+        if response == []:
+            response = [pad_token_id] # fix empty response
+        input = torch.tensor(response, dtype=torch.long, device=device).unsqueeze(0)
+        # 默认深度取 4
+        h = model.forward_hidden_state(input, depth=4) # (1, D)
+        hidden_states.append(h.detach())
+    hidden_states = torch.concat(hidden_states, dim=0) # (N, D)
+
+    hidden_states = F.normalize(hidden_states, dim=-1)
+    sim_matrix = hidden_states @ hidden_states.T # (N, N)
+
+    N = sim_matrix.size(0)
+    mask = torch.eye(N, device=sim_matrix.device, dtype=torch.bool)
+    sim_matrix = sim_matrix.masked_fill(mask, -float("inf"))
+
+    sim_weights = F.softmax(sim_matrix / tau, dim=-1)
+
+    # \tilde r_i = r_i - alpha * sum_j s_ij * r_j
+    weighted_baseline = sim_weights @ rewards
+    adjusted_rewards = (1-alpha) * rewards + alpha * weighted_baseline
+
+    if not fix_model:
+        model.train()
+
+    return adjusted_rewards.tolist()
+
+
+def normalize_rewards_per_group(
+    episodes: List[Episode], 
+    use_length_grouping: bool = False,
+    use_difficulty_aware_advantage: bool = False,
+    use_similarity_weighting: bool = False,
+    model: Transformer = None,
+    similarity_kwargs: dict = dict(),
+) -> List[Episode]:
     """Normalize rewards per group. A group is defined by the prefix (and optionally response length bucket)."""
     groups = defaultdict(list)
     
@@ -311,14 +372,61 @@ def normalize_rewards_per_group(episodes: List[Episode], use_length_grouping: bo
         groups[key].append(episode)
         
     output = []
-    for group in groups.values():
-        group_rewards = [item.reward for item in group]
-        mean_reward = np.mean(group_rewards)
-        std_reward = np.std(group_rewards)
-        for episode in group:
-            normalized_reward = (episode.reward - mean_reward) / (std_reward + 1e-4)
-            episode = dataclasses.replace(episode, reward=normalized_reward)
-            output.append(episode)
+    
+    if use_difficulty_aware_advantage:
+        # Cross-prompt difficulty awareness:
+        # 1. Compute group means to estimate task difficulty relative to the current batch
+        group_stats = []
+        for group in groups.values():
+            # Apply similarity weighting if enabled
+            group_rewards = get_rewards_from_episodes(
+                group, 
+                use_similarity_weighting=use_similarity_weighting,
+                model=model,
+                **similarity_kwargs
+            )
+            m = np.mean(group_rewards)
+            group_stats.append(m)
+        batch_mean_reward = np.mean(group_stats) if group_stats else 0.0
+
+        for group in groups.values():
+            group_rewards = get_rewards_from_episodes(
+                group, 
+                use_similarity_weighting=use_similarity_weighting,
+                model=model,
+                **similarity_kwargs
+            )
+            mean_reward = np.mean(group_rewards)
+            std_reward = np.std(group_rewards)
+
+            # 2. Difficulty Scaling Factor: 
+            # Harder questions (lower mean_reward than batch average) get higher weights
+            difficulty_weight = 1.0 + (batch_mean_reward - mean_reward)
+            # Clip to maintain training stability (e.g., 0.5 to 2.0x weight)
+            difficulty_weight = np.clip(difficulty_weight, 0.5, 2.0)
+
+            for idx, episode in enumerate(group):
+                normalized_reward = (group_rewards[idx] - mean_reward) / (std_reward + 1e-4)
+                # 3. Apply the cross-group scaling to the advantage
+                weighted_reward = normalized_reward * difficulty_weight
+                episode = dataclasses.replace(episode, reward=weighted_reward)
+                output.append(episode)
+    else:
+        # Original logic (optionally with similarity weighting)
+        for group in groups.values():
+            group_rewards = get_rewards_from_episodes(
+                group, 
+                use_similarity_weighting=use_similarity_weighting,
+                model=model,
+                **similarity_kwargs
+            )
+            mean_reward = np.mean(group_rewards)
+            std_reward = np.std(group_rewards)
+            for idx, episode in enumerate(group):
+                normalized_reward = (group_rewards[idx] - mean_reward) / (std_reward + 1e-4)
+                episode = dataclasses.replace(episode, reward=normalized_reward)
+                output.append(episode)
+                
     return output
 
 
@@ -357,6 +465,9 @@ def update_policy(
     clip_ratio: float = 0.2,
     enable_prefix: bool = False,
     prefix_sft_coeff: float = 0.2,
+    use_difficulty_aware_advantage: bool = False,
+    use_similarity_weighting: bool = False,
+    similarity_kwargs: dict = dict(),
 ):
     """Update the policy using the GRPO algorithm.
     
@@ -377,8 +488,18 @@ def update_policy(
         use_dynamic_clipping: Whether to use dynamic clipping
         use_kl_penalty: Whether to use KL penalty
         clip_ratio: Fixed clip ratio for PPO-style clipping (when use_dynamic_clipping=False)
+        use_difficulty_aware_advantage: Whether to use cross-group difficulty scaling
+        use_similarity_weighting: Whether to use similarity-based reward weighting
+        similarity_kwargs: Kwargs for similarity weighting
     """
-    episodes = normalize_rewards_per_group(episodes, use_length_grouping=use_length_grouping)
+    episodes = normalize_rewards_per_group(
+        episodes, 
+        use_length_grouping=use_length_grouping,
+        use_difficulty_aware_advantage=use_difficulty_aware_advantage,
+        use_similarity_weighting=use_similarity_weighting,
+        model=model,
+        similarity_kwargs=similarity_kwargs,
+    )
     
     # If using length grouping, assign length buckets to episodes
     if use_length_grouping:
