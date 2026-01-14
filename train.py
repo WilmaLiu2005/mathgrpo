@@ -231,6 +231,10 @@ def main(config_path: str):
     global_step = 0
     start_time = time.time()
 
+    # For dynamic difficulty grouping
+    question_accuracies = {}
+    use_difficulty_sorting = config["training"].get("use_difficulty_sorting", False)
+
     for epoch in range(1, num_epochs + 1):
         for step_in_epoch, batch in enumerate(train_dataloader, start=1):
             global_step += 1
@@ -252,6 +256,16 @@ def main(config_path: str):
 
             if config["training"]["skip_unfinished_episodes"]:
                 episodes = [ep for ep in episodes if ep.is_finished]
+
+            # Collect accuracies for dynamic difficulty grouping during epoch 1
+            if epoch == 1 and use_difficulty_sorting:
+                for i, idx in enumerate(batch.indices):
+                    start_idx = i * NUM_ANSWERS_PER_QUESTION
+                    end_idx = start_idx + NUM_ANSWERS_PER_QUESTION
+                    question_episodes = episodes[start_idx:end_idx]
+                    if question_episodes:
+                        avg_acc = np.mean([ep.reward_info.get("answer_reward", 0.0) for ep in question_episodes])
+                        question_accuracies[idx] = float(avg_acc)
 
             process_rewards_kwargs = dict(device=device, dtype=dtype, pad_token_id=tokenizer.pad_token_id)
             process_rewards_kwargs["use_similarity_weighting"] = use_similarity_weighting
@@ -396,6 +410,29 @@ def main(config_path: str):
             # 如设置了 max_steps，则达到后提前结束
             if max_steps is not None and global_step >= max_steps:
                 break
+
+        # End of epoch logic
+        if epoch == 1 and use_difficulty_sorting:
+            print(f"\nEpoch 1 finished. Sorting dataset by difficulty for subsequent epochs...")
+            # Update dataset with collected accuracies
+            accuracies = [question_accuracies.get(i, 0.0) for i in range(len(train_dataset))]
+            train_dataset.data = train_dataset.data.copy()
+            train_dataset.data['accuracy'] = accuracies
+            # Sort by accuracy descending (simple first)
+            train_dataset.data = train_dataset.data.sort_values(by='accuracy', ascending=False)
+            
+            print(f"Top 5 accuracies: {train_dataset.data['accuracy'].head().tolist()}")
+            print(f"Bottom 5 accuracies: {train_dataset.data['accuracy'].tail().tolist()}")
+            
+            # Re-create train_dataloader with shuffle=False for curriculum
+            train_dataloader = DataLoader(
+                train_dataset,
+                shuffle=False,
+                collate_fn=GSM8KDataset.collate_fn,
+                generator=generator,
+                batch_size=NUM_QUESTIONS_PER_BATCH,
+            )
+            print("Dataset sorted and dataloader updated.")
 
         if max_steps is not None and global_step >= max_steps:
             break

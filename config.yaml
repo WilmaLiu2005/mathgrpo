@@ -63,6 +63,9 @@ training:
   
   # Reward 归一化参数
   use_length_grouping: true     # 是否使用长度分组进行 reward 归一化
+
+  # 题目难度排序
+  use_difficulty_sorting: false # 是否使用题目难度进行排序
   
   # Prefix 训练模式配置
   enable_prefix: false            # 是否启用 prefix 训练模式
