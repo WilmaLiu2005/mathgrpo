@@ -1,127 +1,193 @@
-# GRPO:Zero
+# Exploring GRPO Optimization Beyond DAPO: A Systematic Study on Known Limitations
 
-GRPO training with minimal dependencies (and low GPU memory usage!). We implement almost everything from scratch and only depend on `tokenizers` for tokenization and `pytorch` for training.
+本项目是对 Group Relative Policy Optimization (GRPO) 算法的系统性研究，旨在探索 GRPO 优化方法并系统性地研究已知限制。
 
-* No `transformers` and `vLLM` dependencies!
-* The default config is set to run on a single A40 GPU (48GB VRAM) for a few hours to get good results. (An A40 costs `$0.44` per hour if you rent it from RunPod.)
-* We also support training with a 24GB VRAM GPU (e.g., an RTX 4090 GPU) by offloading the optimizer to CPU. Fortunately, this only adds a small overhead to the training because we only update the policy network a few hundred times during the entire training process.
-* We support several improvements over the original GRPO algorithm from the [DAPO project](https://arxiv.org/abs/2503.14476), including:
+## 项目概述
 
-  * **Token-level policy gradient loss**: every token is equally weighted in the policy gradient loss.
-  * **Removing KL Divergence**: the KL divergence is not used in the policy gradient loss by default. This reduces GPU memory usage as we no longer need the reference policy network.
-  * **Overlong episode filtering**: skips unfinished episodes that exceed context length limits. This stabilizes training. Set `skip_unfinished_episodes` to `true` to enable it.
+本项目实现了 GRPO 算法，并在 GSM8K 数学问题求解任务上进行了实验。项目包含完整的训练流程、评估系统以及多种优化技术的实现，包括动态裁剪、难度感知优势缩放、相似度加权奖励等。
 
-## Configuration Switches
-
-We provide several advanced switches in `config.yaml` to experiment with different training dynamics. Note that many are disabled by default and require being set to `true` to activate.
-
-### 1. Training Stability & Filtering
-* **`skip_unfinished_episodes`** (default: `false`): When set to `true`, episodes that do not reach the EOS token (e.g., due to length limits) are discarded. This helps prevent the model from learning to generate incomplete logic.
-
-### 2. Core Algorithm Enhancements
-* **`use_dynamic_clipping`** (default: `true`): Enables adaptive clipping bounds for the PPO objective, which adjust based on the old policy's probability density. If `false`, standard fixed PPO-style clipping (`clip_ratio`) is used.
-* **`use_kl_penalty`** (default: `false`): Enables standard KL divergence regularization against a reference model to prevent the policy from shifting too far from the base model.
-* **`use_length_grouping`** (default: `true`): If `true`, reward normalization happens within buckets of similar response lengths, preventing the model from disproportionately rewarding short or long answers simply because of their length.
-
-### 3. Reward & Advantage Innovation
-* **`use_difficulty_aware_advantage`** (default: `true`): Enables **Cross-prompt Difficulty Awareness**. It scales the advantage based on the relative difficulty of the question in the current batch. Harder questions (lower mean rewards) get higher gradient weights to prioritize learning "tougher" logic.
-* **`use_similarity_weighting`** (default: `true`): Enables **Semantic-based Reward Re-weighting**. Uses a small encoder (from the policy model itself) to compute hidden state similarities between responses in a group. It penalizes redundant responses to encourage diversity in the Reasoning Chain.
-
-### 4. Advanced Training Modes
-* **`enable_prefix`** (default: `false`): Enables **Prefix Training Mode**. This allows the model to load pre-generated reasoning "prefixes" (e.g., from DeepSeek or previous 3B runs) and applies an SFT-style loss on these segments to guide the model towards standard reasoning patterns.
-
-## Algorithm 
-
-Group Relative Policy Optimization (GRPO) is an algorithm proposed by Deepseek for training large language models with reinforcement learning. The idea is simple: for each question, we randomly sample multiple answers. The advantage of an answer is then defined as the normalized reward. This gets rid of the value estimation network. In particular, we implement the following algorithm:
-
-1. For each training step, randomly sample $N$ questions $q_1, q_2, \cdots, q_N$.
-2. For each question $q_i$, sample $M$ answers $a_{i,1}, a_{i,2}, \cdots, a_{i,M}$.
-3. Compute the reward $r_{i,j}$ for each answer $a_{i,j}$.
-4. Compute the mean and std of the rewards for each question $q_i$.
-
-$$
-\begin{aligned}
-\mu_i &\leftarrow \text{mean}(r_{i,1}, r_{i,2}, \cdots, r_{i,M}) \\
-\sigma_i &\leftarrow \text{std}(r_{i,1}, r_{i,2}, \cdots, r_{i,M})
-\end{aligned}
-$$
-
-5. For each token $t$ in the answer $a_{i,j}$, compute the advantage as
-
-$$A_{i,j}[t] \leftarrow \frac{r_{i,j} - \mu_i}{\sigma_i}$$
-
-6. Compute policy gradient using PPO surrogate objective. For simplicity, we will only do one policy update per iteration, in which the gradient of the PPO objective is equivalent to following vanilla policy gradient estimation (per token).
-
-$$
-\nabla_\theta \log \pi_\theta(a_{i,j}[t]) \cdot A_{i,j}[t]
-$$
-
-7. Update the policy network $\pi(\theta)$ using the gradient. Go back to step 1.
-
-## GSM8K Task
-
-We train the Qwen2.5 models on the **GSM8K** dataset, a grade-school math word-problem dataset. Each question describes a short math scenario, and the goal is to produce the correct final numeric answer.
-
-Example:
+## 代码结构
 
 ```
-Question:  
-A book costs 12 dollars and a pen costs 3 dollars. If Jenny buys 4 books and 2 pens, how much does she spend?
-
-Answer:  (step-by-step reasoning...)  →  54
+GRPO-zero/
+├── train.py                 # 主训练脚本
+├── grpo.py                  # GRPO 算法核心实现（rollout 和 update_policy）
+├── qwen2_model.py          # Qwen2 Transformer 模型实现
+├── optimizer.py            # 内存高效的 AdamW 优化器
+├── countdown_task.py       # GSM8K 数据集和任务相关功能
+├── generate_prefixes.py    # Prefix 生成脚本（用于 prefix 训练模式）
+├── openrouter_client.py    # OpenRouter API 客户端（用于调用外部模型）
+├── tokenizer.py            # 分词器实现
+├── data_types.py           # 数据类型定义（Episode, MiniBatch）
+├── config.yaml             # 配置文件
+└── requirements.txt        # 依赖包列表
 ```
 
-## Reward Function
+## 核心功能模块
 
-To solve GSM8K, the model is trained (using GRPO) to generate chain-of-thought reasoning before giving the final numerical answer. The expected output format is:
+### 1. GRPO 算法实现 (`grpo.py`)
 
+- **`rollout()`**: 执行策略采样，为每个问题生成多个答案
+  - 支持 prefix 训练模式（使用预生成的思考前缀）
+  - 支持温度采样和多种采样策略
+  - 返回完整的 Episode 信息（token IDs、log probabilities、rewards 等）
+
+- **`update_policy()`**: 执行策略更新
+  - 动态裁剪（Dynamic Clipping）机制
+  - 难度感知优势缩放（Difficulty-aware Advantage Scaling）
+  - 相似度加权奖励（Similarity-weighted Reward）
+  - KL 散度正则化
+  - 长度分组奖励归一化
+
+### 2. 训练脚本 (`train.py`)
+
+- 完整的训练循环实现
+- 支持多轮训练（epochs）和步数限制（max_steps）
+- 定期评估和检查点保存
+- 集成 WandB 日志记录
+- 支持长度分组采样策略
+
+### 3. 模型实现 (`qwen2_model.py`)
+
+- Qwen2 Transformer 架构实现
+- 支持 bfloat16 和 float16 精度
+- 高效的注意力机制和前向传播
+
+### 4. 任务模块 (`countdown_task.py`)
+
+- **`GSM8KDataset`**: GSM8K 数据集加载器
+  - 支持训练集和测试集
+  - 支持 prefix 数据加载
+  - 自动批处理和数据整理
+
+- **`reward_function()`**: 奖励函数
+  - 基于答案正确性的奖励计算
+  - 支持多种奖励策略
+
+- **Prefix 生成功能**:
+  - `generate_prefix_with_deepseek()`: 使用 DeepSeek API 生成 prefix
+  - `generate_prefix_with_3b()`: 使用本地 3B 模型生成 prefix
+  - `clean_prefix_text()`: 清理和规范化 prefix 文本
+
+### 5. Prefix 生成工具 (`generate_prefixes.py`)
+
+- 批量生成 prefix 数据
+- 支持并发生成（DeepSeek API 和本地 3B 模型）
+- 自动截断和清理
+- 输出 JSON 格式的 prefix 文件供训练使用
+
+### 6. 优化器 (`optimizer.py`)
+
+- **`MemoryEfficientAdamW`**: 内存高效的 AdamW 实现
+  - 支持将优化器状态存储在 CPU 上以节省 GPU 内存
+  - 保持参数和梯度在 GPU 上
+
+### 7. 数据类型 (`data_types.py`)
+
+- **`Episode`**: 存储单个采样轨迹的所有信息
+  - 前缀、生成文本、token IDs
+  - 奖励信息和 log probabilities
+  - Prefix 训练模式相关字段
+
+- **`MiniBatch`**: 批处理数据结构
+  - 问题和答案列表
+  - Prefix 数据（如果启用）
+
+## 主要特性
+
+### GRPO 优化技术
+
+1. **动态裁剪 (Dynamic Clipping)**
+   - 根据样本难度动态调整裁剪范围
+   - 可配置的 epsilon 上下界
+
+2. **难度感知优势缩放 (Difficulty-aware Advantage Scaling)**
+   - 跨组优势归一化
+   - 考虑不同难度组之间的差异
+
+3. **相似度加权奖励 (Similarity-weighted Reward)**
+   - 基于隐空间相似度的奖励重加权
+   - 可配置的混合系数和温度参数
+
+4. **KL 散度正则化**
+   - 防止策略偏离初始策略过远
+   - 可配置的正则化系数
+
+5. **长度分组奖励归一化**
+   - 按生成长度分组进行奖励归一化
+   - 减少长度偏差对训练的影响
+
+### Prefix 训练模式
+
+- 使用预生成的思考前缀引导模型生成
+- 支持 DeepSeek（teacher）和 3B（student）两种 prefix 来源
+- Prefix dropout 机制，提高泛化能力
+- Prefix-SFT loss，对齐 prefix 分布
+
+## 使用方法
+
+### 1. 配置环境
+
+安装依赖：
+```bash
+pip install -r requirements.txt
 ```
-<think>Model step-by-step reasoning</think>
-<answer>Final numeric answer</answer>
+
+### 2. 配置文件
+
+编辑 `config.yaml`，设置：
+- 模型路径 (`model.pretrained_model_path`)
+- 数据路径 (`data.path`)
+- 训练超参数
+- GRPO 算法参数
+
+### 3. 生成 Prefix（可选）
+
+如果使用 prefix 训练模式：
+```bash
+python generate_prefixes.py --config config.yaml --output prefixes.json
 ```
 
-The reward has two components:
+然后在 `config.yaml` 中设置：
+```yaml
+training:
+  enable_prefix: true
+  prefix_file: "prefixes.json"
+```
 
-1. **Format Reward**
-   The model gets **0.1** reward if it produces the exact required XML-style format with `<think>`…`</think>` and `<answer>`…`</answer>` tags. Otherwise 0.
-
-2. **Answer Reward**
-   The model receives a reward of **1** if:
-
-   * the final answer inside `<answer>`…`</answer>` is a valid number
-   * and matches the ground-truth GSM8K answer exactly
-
-   Otherwise, the reward is **0**.
-
-
-## Training
-
-We use the `Qwen2.5-3B-Instruct` model for training. To train the model, run the following commands:
+### 4. 开始训练
 
 ```bash
-# 激活你的 conda 环境（假设你已经有了合适的环境）
-# conda activate your_env_name
-
-# 安装 git-lfs
-(apt update; apt install git-lfs -y; )git lfs install
-
-pip install -U pip
-pip install torch --index-url https://download.pytorch.org/whl/cu124
-pip -r requirements.txt
-
-# 下载数据集和预训练模型
-python download.py
-
-# 训练模型
-python train.py
-
+python train.py --config config.yaml
 ```
-## Acknowledgements
 
-This project builds upon the work of several outstanding projects:
+## 配置说明
 
-- [DeepSeekMath](https://arxiv.org/abs/2402.03300) for pioneering the GRPO algorithm.
-- [DAPO](https://arxiv.org/abs/2503.14476) for their enhancements to the original GRPO algorithm.
-- [TinyZero](https://github.com/Jiayi-Pan/TinyZero) for their implementation of GRPO and creation of the [CountDown-Tasks-3to4](https://huggingface.co/datasets/Jiayi-Pan/Countdown-Tasks-3to4) dataset.
-- [nano-aha-moment](https://github.com/McGill-NLP/nano-aha-moment/tree/main) for their clear implementation and tutorial on the GRPO algorithm.
-- [Qwen2.5](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct) for developing the high-quality pretrained model used in this project.
+主要配置项包括：
+
+- **模型配置**: 模型路径、设备、数据类型
+- **数据配置**: 数据集路径、测试集大小
+- **训练配置**: 批次大小、学习率、训练轮数
+- **GRPO 参数**: 动态裁剪、优势缩放、相似度加权等开关和参数
+- **Prefix 配置**: Prefix 训练模式相关参数
+- **WandB 配置**: 实验跟踪和日志记录
+
+详细配置说明请参考 `config.yaml` 文件中的注释。
+
+## 依赖
+
+主要依赖包：
+- PyTorch
+- NumPy
+- PyYAML
+- WandB
+- Pandas
+- tqdm
+- HuggingFace Transformers (用于模型加载)
+
+完整依赖列表请参见 `requirements.txt`。
+
+## 许可证
+
+详见 `LICENSE` 文件。
+

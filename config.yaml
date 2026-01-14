@@ -19,7 +19,7 @@ training:
   temperature: 0.9            # 采样温度，控制随机性（1.0=标准采样，>1.0=更随机，<1.0=更确定）
 
   batch_size: 128
-  num_questions_per_batch: 4
+  num_questions_per_batch: 32
 
   micro_batch_size: 8
   max_grad_norm: 1.0
